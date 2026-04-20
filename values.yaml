@@ -1,0 +1,24 @@
+
+
+# fullnameOverride: "my-postgres"
+
+image:
+  repository: postgres
+  tag: 18.1
+  pullPolicy: IfNotPresent
+  pullSecrets: {}
+
+command:
+
+resources: {}
+
+auth:
+  postgresPassword:
+  database:
+
+persistence:
+  enabled: true
+  storageClass:
+  size:
+  accessModes:
+    - ReadWriteMany
