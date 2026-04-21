@@ -1,0 +1,17 @@
+{{- if .Values.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ template "toggle-postgres.fullname" . }}-pg-data
+  labels:
+    {{- include "toggle-postgres.labels" . | nindent 4 }}
+spec:
+  {{- with .Values.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  accessModes:
+    {{- toYaml .Values.persistence.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ required "persistence.size is required" .Values.persistence.size | quote }}
+{{- end }}

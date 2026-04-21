@@ -1,0 +1,28 @@
+suite: pvc
+templates:
+  - pvc.yaml
+tests:
+  - it: defaults to ReadWriteOnce with the configured size
+    asserts:
+      - isKind: { of: PersistentVolumeClaim }
+      - equal: { path: 'spec.accessModes[0]', value: ReadWriteOnce }
+      - equal: { path: spec.resources.requests.storage, value: 10Gi }
+
+  - it: emits no PVC when persistence is disabled
+    set:
+      persistence.enabled: false
+    asserts:
+      - hasDocuments: { count: 0 }
+
+  - it: fails when size is empty
+    set:
+      persistence.size: ""
+    asserts:
+      - failedTemplate:
+          errorMessage: "persistence.size is required"
+
+  - it: applies storageClass when set
+    set:
+      persistence.storageClass: gp3
+    asserts:
+      - equal: { path: spec.storageClassName, value: gp3 }

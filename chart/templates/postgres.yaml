@@ -1,0 +1,153 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ template "toggle-postgres.fullname" . }}
+  labels:
+    {{- include "toggle-postgres.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ template "toggle-postgres.fullname" . }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "toggle-postgres.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "toggle-postgres.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
+        {{- if .Values.auth.dumpUrl }}
+        checksum/restore-script: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- end }}
+    spec:
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if .Values.auth.dumpUrl }}
+      initContainers:
+        - name: download-dump
+          image: "{{ .Values.initImage.repository }}:{{ .Values.initImage.tag }}"
+          imagePullPolicy: {{ .Values.initImage.pullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              if [ -s /var/lib/postgresql/data/pgdata/PG_VERSION ]; then
+                echo "PGDATA already initialized; skipping dump download."
+                exit 0
+              fi
+              echo "Downloading dump..."
+              curl -fsSL --retry 3 --retry-delay 5 -o /dump/dump "$DUMP_URL"
+              echo "Downloaded $(wc -c < /dump/dump) bytes."
+          env:
+            - name: DUMP_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ template "toggle-postgres.secretname" . }}
+                  key: DUMP_URL
+          volumeMounts:
+            - name: dump
+              mountPath: /dump
+            - name: pg-data
+              mountPath: /var/lib/postgresql/data
+      {{- end }}
+      containers:
+        - name: pg
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if .Values.auth.dumpUrl }}
+          command:
+            - /bin/sh
+            - /etc/postgres-wrapper/entrypoint-wrapper.sh
+          args:
+            - postgres
+          {{- end }}
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            {{- if .Values.auth.dumpUrl }}
+            - name: PG_PVC_NAME
+              value: {{ template "toggle-postgres.fullname" . }}-pg-data
+            {{- end }}
+          envFrom:
+            - secretRef:
+                name: {{ template "toggle-postgres.secretname" . }}
+          startupProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - exec pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" -h 127.0.0.1 -p 5432
+            # Restore can take a while; allow up to 30 min on first start.
+            failureThreshold: 180
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - exec pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" -h 127.0.0.1 -p 5432
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - exec pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" -h 127.0.0.1 -p 5432
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: pg-data
+              mountPath: /var/lib/postgresql/data
+            {{- if .Values.auth.dumpUrl }}
+            - name: dump
+              mountPath: /dump
+              readOnly: true
+            - name: restore-script
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+            - name: entrypoint-wrapper
+              mountPath: /etc/postgres-wrapper
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: pg-data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ template "toggle-postgres.fullname" . }}-pg-data
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- if .Values.auth.dumpUrl }}
+        - name: dump
+          emptyDir: {}
+        - name: restore-script
+          configMap:
+            name: {{ template "toggle-postgres.fullname" . }}-restore
+            defaultMode: 0755
+            items:
+              - key: 10-restore.sh
+                path: 10-restore.sh
+        - name: entrypoint-wrapper
+          configMap:
+            name: {{ template "toggle-postgres.fullname" . }}-restore
+            defaultMode: 0755
+            items:
+              - key: entrypoint-wrapper.sh
+                path: entrypoint-wrapper.sh
+        {{- end }}

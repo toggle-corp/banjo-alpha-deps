@@ -1,0 +1,14 @@
+suite: pdb
+templates:
+  - pdb.yaml
+tests:
+  - it: emits no PDB by default
+    asserts:
+      - hasDocuments: { count: 0 }
+
+  - it: emits PDB with minAvailable=1 when enabled
+    set:
+      podDisruptionBudget.enabled: true
+    asserts:
+      - isKind: { of: PodDisruptionBudget }
+      - equal: { path: spec.minAvailable, value: 1 }

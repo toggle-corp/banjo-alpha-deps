@@ -1,0 +1,46 @@
+suite: configmap
+templates:
+  - configmap.yaml
+tests:
+  - it: emits no ConfigMap when dumpUrl is empty
+    asserts:
+      - hasDocuments: { count: 0 }
+
+  - it: emits ConfigMap with restore script and entrypoint wrapper when dumpUrl is set
+    set:
+      auth.dumpUrl: https://u:p@x/d.dump
+    asserts:
+      - isKind: { of: ConfigMap }
+      - exists: { path: 'data["10-restore.sh"]' }
+      - exists: { path: 'data["entrypoint-wrapper.sh"]' }
+
+  - it: restore script handles all three formats and writes the sentinel
+    set:
+      auth.dumpUrl: https://u:p@x/d.dump
+    asserts:
+      - matchRegex:
+          path: 'data["10-restore.sh"]'
+          pattern: 'gunzip -t'
+      - matchRegex:
+          path: 'data["10-restore.sh"]'
+          pattern: 'pg_restore -l'
+      - matchRegex:
+          path: 'data["10-restore.sh"]'
+          pattern: 'psql .* -f'
+      - matchRegex:
+          path: 'data["10-restore.sh"]'
+          pattern: 'touch "\$PGDATA/\.restore_complete"'
+
+  - it: wrapper checks the sentinel and exits non-zero on missing
+    set:
+      auth.dumpUrl: https://u:p@x/d.dump
+    asserts:
+      - matchRegex:
+          path: 'data["entrypoint-wrapper.sh"]'
+          pattern: '\.restore_complete'
+      - matchRegex:
+          path: 'data["entrypoint-wrapper.sh"]'
+          pattern: 'exit 1'
+      - matchRegex:
+          path: 'data["entrypoint-wrapper.sh"]'
+          pattern: 'exec docker-entrypoint\.sh'

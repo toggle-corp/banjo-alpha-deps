@@ -1,7 +1,7 @@
 apiVersion: v2
-name: toggle-postgres
+name: tcpg-helm
 description: "Helm Chart to deploy Simple Postgres (for alpha instances)"
 type: application
 version: 0.0.1  # managed by release.sh
 sources:
-  - https://github.com/toggle-corp
+  - https://gitea.local.togglecorp.com/tc-infra/tcpg-helm

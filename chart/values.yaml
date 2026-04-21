@@ -1,0 +1,46 @@
+# fullnameOverride: "my-postgres"
+
+image:
+  repository: postgres
+  tag: "18.1"
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+initImage:
+  repository: curlimages/curl
+  tag: "8.11.1"
+  pullPolicy: IfNotPresent
+
+resources: {}
+
+auth:
+  database: postgres
+  username: postgres
+  # If empty, a random password is generated on first install and preserved across upgrades.
+  password: ""
+  # Optional one-shot restore on first init. URL may embed credentials, e.g.
+  #   https://user:pass@example.com/path/dump.sql.gz
+  # Empty → empty DB. Supports plain .sql, .sql.gz, and `pg_dump -Fc` custom dumps.
+  dumpUrl: ""
+
+service:
+  type: ClusterIP
+  port: 5432
+
+persistence:
+  enabled: true
+  storageClass: ""
+  size: 10Gi
+  accessModes:
+    - ReadWriteOnce
+
+podSecurityContext:
+  runAsUser: 999
+  runAsGroup: 999
+  fsGroup: 999
+  runAsNonRoot: true
+
+# Single-replica DB → PDB blocks voluntary node drains. Off by default; enable
+# only if you'd rather have a stuck drain than an automated DB restart.
+podDisruptionBudget:
+  enabled: false

@@ -1,0 +1,13 @@
+{{- if .Values.auth.dumpUrl }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ template "toggle-postgres.fullname" . }}-restore
+  labels:
+    {{- include "toggle-postgres.labels" . | nindent 4 }}
+data:
+  10-restore.sh: |
+{{ .Files.Get "scripts/10-restore.sh" | indent 4 }}
+  entrypoint-wrapper.sh: |
+{{ .Files.Get "scripts/entrypoint-wrapper.sh" | indent 4 }}
+{{- end }}

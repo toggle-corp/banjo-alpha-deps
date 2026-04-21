@@ -1,0 +1,13 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ template "toggle-postgres.fullname" . }}
+  labels:
+    {{- include "toggle-postgres.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "toggle-postgres.selectorLabels" . | nindent 6 }}
+{{- end }}

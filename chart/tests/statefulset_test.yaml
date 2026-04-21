@@ -1,0 +1,131 @@
+suite: statefulset
+templates:
+  - postgres.yaml
+  - secrets.yaml
+  - configmap.yaml
+release:
+  name: my-release
+tests:
+  - it: is a single-replica StatefulSet
+    template: postgres.yaml
+    asserts:
+      - isKind: { of: StatefulSet }
+      - equal: { path: spec.replicas, value: 1 }
+      - equal: { path: spec.serviceName, value: my-release-toggle-postgres }
+
+  - it: has hardened pod securityContext
+    template: postgres.yaml
+    asserts:
+      - equal: { path: spec.template.spec.securityContext.runAsUser, value: 999 }
+      - equal: { path: spec.template.spec.securityContext.runAsGroup, value: 999 }
+      - equal: { path: spec.template.spec.securityContext.fsGroup, value: 999 }
+      - equal: { path: spec.template.spec.securityContext.runAsNonRoot, value: true }
+
+  - it: sets PGDATA to a subdirectory
+    template: postgres.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PGDATA
+            value: /var/lib/postgresql/data/pgdata
+
+  - it: wires envFrom to the credentials secret
+    template: postgres.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].envFrom[0].secretRef.name
+          value: my-release-toggle-postgres-credential
+
+  - it: omits initContainer, command override, and restore mounts when no dumpUrl
+    template: postgres.yaml
+    asserts:
+      - isNull: { path: spec.template.spec.initContainers }
+      - isNull: { path: 'spec.template.spec.containers[0].command' }
+      - isNull: { path: 'spec.template.spec.containers[0].args' }
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: entrypoint-wrapper
+            mountPath: /etc/postgres-wrapper
+            readOnly: true
+      - notContains:
+          path: spec.template.spec.volumes
+          any: true
+          content:
+            name: dump
+
+  - it: adds curl initContainer when dumpUrl is set
+    template: postgres.yaml
+    set:
+      auth.dumpUrl: https://u:p@x/d.dump
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: download-dump
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].image
+          pattern: '^curlimages/curl:'
+      - equal:
+          path: spec.template.spec.initContainers[0].env[0].name
+          value: DUMP_URL
+      - equal:
+          path: spec.template.spec.initContainers[0].env[0].valueFrom.secretKeyRef.key
+          value: DUMP_URL
+
+  - it: overrides command to entrypoint wrapper when dumpUrl is set
+    template: postgres.yaml
+    set:
+      auth.dumpUrl: https://u:p@x/d.dump
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value:
+            - /bin/sh
+            - /etc/postgres-wrapper/entrypoint-wrapper.sh
+      - equal:
+          path: spec.template.spec.containers[0].args
+          value:
+            - postgres
+
+  - it: mounts dump, restore-script, and wrapper when dumpUrl is set
+    template: postgres.yaml
+    set:
+      auth.dumpUrl: https://u:p@x/d.dump
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content: { name: dump, mountPath: /dump, readOnly: true }
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content: { name: restore-script, mountPath: /docker-entrypoint-initdb.d, readOnly: true }
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content: { name: entrypoint-wrapper, mountPath: /etc/postgres-wrapper, readOnly: true }
+
+  - it: uses PVC volume by default and emptyDir when persistence disabled
+    template: postgres.yaml
+    set:
+      persistence.enabled: false
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[0].name
+          value: pg-data
+      - isNotNull:
+          path: spec.template.spec.volumes[0].emptyDir
+      - isNull:
+          path: spec.template.spec.volumes[0].persistentVolumeClaim
+
+  - it: includes secret checksum annotation
+    template: postgres.yaml
+    asserts:
+      - exists:
+          path: 'spec.template.metadata.annotations["checksum/secret"]'
+
+  - it: includes restore-script checksum annotation only when dumpUrl is set
+    template: postgres.yaml
+    set:
+      auth.dumpUrl: https://u:p@x/d.dump
+    asserts:
+      - exists:
+          path: 'spec.template.metadata.annotations["checksum/restore-script"]'
