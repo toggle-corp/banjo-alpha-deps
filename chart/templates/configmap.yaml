@@ -1,10 +1,14 @@
-{{- if .Values.auth.dumpUrl }}
+{{- if .Values.auth.dumpPath }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ template "toggle-postgres.fullname" . }}-restore
+  name: {{ template "tcpg.fullname" . }}-restore
   labels:
-    {{- include "toggle-postgres.labels" . | nindent 4 }}
+    {{- include "tcpg.labels" . | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 data:
   10-restore.sh: |
 {{ .Files.Get "scripts/10-restore.sh" | indent 4 }}

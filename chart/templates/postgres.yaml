@@ -1,22 +1,26 @@
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: {{ template "toggle-postgres.fullname" . }}
+  name: {{ template "tcpg.fullname" . }}
   labels:
-    {{- include "toggle-postgres.labels" . | nindent 4 }}
+    {{- include "tcpg.labels" . | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
-  serviceName: {{ template "toggle-postgres.fullname" . }}
+  serviceName: {{ template "tcpg.fullname" . }}
   replicas: 1
   selector:
     matchLabels:
-      {{- include "toggle-postgres.selectorLabels" . | nindent 6 }}
+      {{- include "tcpg.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "toggle-postgres.selectorLabels" . | nindent 8 }}
+        {{- include "tcpg.selectorLabels" . | nindent 8 }}
       annotations:
         checksum/secret: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
-        {{- if .Values.auth.dumpUrl }}
+        {{- if .Values.auth.dumpPath }}
         checksum/restore-script: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         {{- end }}
     spec:
@@ -26,29 +30,88 @@ spec:
       {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
-      {{- if .Values.auth.dumpUrl }}
+      {{- if .Values.auth.dumpPath }}
+      {{- if not (has .Values.auth.dumpAuth.type (list "none" "basic" "bearer")) -}}
+      {{- fail "auth.dumpAuth.type must be one of: none, basic, bearer" -}}
+      {{- end }}
+      {{- if ne .Values.auth.dumpAuth.type "none" }}
+      {{- if and .Values.auth.dumpAuth.value .Values.auth.existingDumpAuthSecret.name -}}
+      {{- fail "Set either auth.dumpAuth.value (inline) or auth.existingDumpAuthSecret.name (external), not both" -}}
+      {{- end }}
+      {{- if and (not .Values.auth.dumpAuth.value) (not .Values.auth.existingDumpAuthSecret.name) -}}
+      {{- fail "auth.dumpAuth.type is basic/bearer but no value source is configured; provide auth.dumpAuth.value or auth.existingDumpAuthSecret.name" -}}
+      {{- end }}
+      {{- end }}
+      {{- if .Values.auth.dumpBaseUrl }}
+      {{- $baseHasSlash := hasSuffix "/" .Values.auth.dumpBaseUrl -}}
+      {{- $pathHasSlash := hasPrefix "/" .Values.auth.dumpPath -}}
+      {{- if and $baseHasSlash $pathHasSlash -}}
+      {{- fail "auth.dumpBaseUrl ends with '/' and auth.dumpPath starts with '/' — would produce '//' in URL; remove one" -}}
+      {{- end }}
+      {{- if and (not $baseHasSlash) (not $pathHasSlash) -}}
+      {{- fail "auth.dumpBaseUrl and auth.dumpPath have no slash between them; add trailing '/' to dumpBaseUrl or leading '/' to dumpPath" -}}
+      {{- end }}
+      {{- end }}
       initContainers:
         - name: download-dump
           image: "{{ .Values.initImage.repository }}:{{ .Values.initImage.tag }}"
           imagePullPolicy: {{ .Values.initImage.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           command:
             - sh
             - -c
             - |
               set -eu
+              LOCAL_DUMP_PATH="/dump/dump"
               if [ -s /var/lib/postgresql/data/pgdata/PG_VERSION ]; then
                 echo "PGDATA already initialized; skipping dump download."
                 exit 0
               fi
-              echo "Downloading dump..."
-              curl -fsSL --retry 3 --retry-delay 5 -o /dump/dump "$DUMP_URL"
-              echo "Downloaded $(wc -c < /dump/dump) bytes."
+              FULL_URL="${DUMP_BASE_URL}${DUMP_PATH}"
+              echo "Downloading dump from $FULL_URL... -> $LOCAL_DUMP_PATH"
+              INSECURE=""
+              if [ "$DUMP_INSECURE_SKIP_TLS_VERIFY" = "true" ]; then
+                echo "WARNING: TLS certificate verification is disabled (-k)"
+                INSECURE="-k"
+              fi
+              case "$DUMP_AUTH_TYPE" in
+                basic)
+                  curl $INSECURE -D - -fsSL --retry 3 --retry-delay 5 -u "$DUMP_AUTH_VALUE" -o "$LOCAL_DUMP_PATH" "$FULL_URL"
+                  ;;
+                bearer)
+                  curl $INSECURE -D - -fsSL --retry 3 --retry-delay 5 -H "Authorization: Bearer $DUMP_AUTH_VALUE" -o "$LOCAL_DUMP_PATH" "$FULL_URL"
+                  ;;
+                none)
+                  curl $INSECURE -D - -fsSL --retry 3 --retry-delay 5 -o "$LOCAL_DUMP_PATH" "$FULL_URL"
+                  ;;
+                *)
+                  echo "Unknown DUMP_AUTH_TYPE: $DUMP_AUTH_TYPE (expected none, basic, bearer)" >&2
+                  exit 1
+                  ;;
+              esac
+              du -sh "$LOCAL_DUMP_PATH"
           env:
-            - name: DUMP_URL
+            - name: DUMP_BASE_URL
+              value: {{ .Values.auth.dumpBaseUrl | quote }}
+            - name: DUMP_PATH
+              value: {{ .Values.auth.dumpPath | quote }}
+            - name: DUMP_AUTH_TYPE
+              value: {{ .Values.auth.dumpAuth.type | quote }}
+            - name: DUMP_INSECURE_SKIP_TLS_VERIFY
+              value: {{ .Values.auth.dumpInsecureSkipTlsVerify | quote }}
+            {{- if ne .Values.auth.dumpAuth.type "none" }}
+            - name: DUMP_AUTH_VALUE
               valueFrom:
                 secretKeyRef:
-                  name: {{ template "toggle-postgres.secretname" . }}
-                  key: DUMP_URL
+                  {{- if .Values.auth.existingDumpAuthSecret.name }}
+                  name: {{ .Values.auth.existingDumpAuthSecret.name | quote }}
+                  key: {{ .Values.auth.existingDumpAuthSecret.key | quote }}
+                  {{- else }}
+                  name: {{ include "tcpg.loadSecretName" . }}
+                  key: DUMP_AUTH_VALUE
+                  {{- end }}
+            {{- end }}
           volumeMounts:
             - name: dump
               mountPath: /dump
@@ -59,7 +122,9 @@ spec:
         - name: pg
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          {{- if .Values.auth.dumpUrl }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          {{- if .Values.auth.dumpPath }}
           command:
             - /bin/sh
             - /etc/postgres-wrapper/entrypoint-wrapper.sh
@@ -73,13 +138,13 @@ spec:
           env:
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
-            {{- if .Values.auth.dumpUrl }}
+            {{- if .Values.auth.dumpPath }}
             - name: PG_PVC_NAME
-              value: {{ template "toggle-postgres.fullname" . }}-pg-data
+              value: {{ template "tcpg.fullname" . }}-pg-data
             {{- end }}
           envFrom:
             - secretRef:
-                name: {{ template "toggle-postgres.secretname" . }}
+                name: {{ template "tcpg.secretname" . }}
           startupProbe:
             exec:
               command:
@@ -114,10 +179,9 @@ spec:
           volumeMounts:
             - name: pg-data
               mountPath: /var/lib/postgresql/data
-            {{- if .Values.auth.dumpUrl }}
+            {{- if .Values.auth.dumpPath }}
             - name: dump
               mountPath: /dump
-              readOnly: true
             - name: restore-script
               mountPath: /docker-entrypoint-initdb.d
               readOnly: true
@@ -125,27 +189,39 @@ spec:
               mountPath: /etc/postgres-wrapper
               readOnly: true
             {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       volumes:
         - name: pg-data
           {{- if .Values.persistence.enabled }}
           persistentVolumeClaim:
-            claimName: {{ template "toggle-postgres.fullname" . }}-pg-data
+            claimName: {{ template "tcpg.fullname" . }}-pg-data
           {{- else }}
           emptyDir: {}
           {{- end }}
-        {{- if .Values.auth.dumpUrl }}
+        {{- if .Values.auth.dumpPath }}
         - name: dump
           emptyDir: {}
         - name: restore-script
           configMap:
-            name: {{ template "toggle-postgres.fullname" . }}-restore
+            name: {{ template "tcpg.fullname" . }}-restore
             defaultMode: 0755
             items:
               - key: 10-restore.sh
                 path: 10-restore.sh
         - name: entrypoint-wrapper
           configMap:
-            name: {{ template "toggle-postgres.fullname" . }}-restore
+            name: {{ template "tcpg.fullname" . }}-restore
             defaultMode: 0755
             items:
               - key: entrypoint-wrapper.sh

@@ -2,12 +2,16 @@
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: {{ template "toggle-postgres.fullname" . }}
+  name: {{ template "tcpg.fullname" . }}
   labels:
-    {{- include "toggle-postgres.labels" . | nindent 4 }}
+    {{- include "tcpg.labels" . | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   minAvailable: 1
   selector:
     matchLabels:
-      {{- include "toggle-postgres.selectorLabels" . | nindent 6 }}
+      {{- include "tcpg.selectorLabels" . | nindent 6 }}
 {{- end }}

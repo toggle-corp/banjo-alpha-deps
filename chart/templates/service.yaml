@@ -1,9 +1,13 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ template "toggle-postgres.fullname" . }}
+  name: {{ template "tcpg.fullname" . }}
   labels:
-    {{- include "toggle-postgres.labels" . | nindent 4 }}
+    {{- include "tcpg.labels" . | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   type: {{ .Values.service.type }}
   ports:
@@ -12,4 +16,4 @@ spec:
       protocol: TCP
       name: postgres
   selector:
-    {{- include "toggle-postgres.selectorLabels" . | nindent 4 }}
+    {{- include "tcpg.selectorLabels" . | nindent 4 }}

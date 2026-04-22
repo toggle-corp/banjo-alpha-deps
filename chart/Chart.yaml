@@ -1,7 +1,7 @@
 apiVersion: v2
-name: tcpg-helm
+name: tcpg
 description: "Helm Chart to deploy Simple Postgres (for alpha instances)"
 type: application
 version: 0.0.1  # managed by release.sh
 sources:
-  - https://gitea.local.togglecorp.com/tc-infra/tcpg-helm
+  - https://gitea.local.togglecorp.com/tc-infra/tcpg

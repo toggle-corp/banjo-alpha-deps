@@ -2,13 +2,14 @@ suite: configmap
 templates:
   - configmap.yaml
 tests:
-  - it: emits no ConfigMap when dumpUrl is empty
+  - it: emits no ConfigMap when dumpPath is empty
     asserts:
       - hasDocuments: { count: 0 }
 
-  - it: emits ConfigMap with restore script and entrypoint wrapper when dumpUrl is set
+  - it: emits ConfigMap with restore script and entrypoint wrapper when dumpPath is set
     set:
-      auth.dumpUrl: https://u:p@x/d.dump
+      auth.dumpBaseUrl: https://example.com
+      auth.dumpPath: /d.dump
     asserts:
       - isKind: { of: ConfigMap }
       - exists: { path: 'data["10-restore.sh"]' }
@@ -16,7 +17,8 @@ tests:
 
   - it: restore script handles all three formats and writes the sentinel
     set:
-      auth.dumpUrl: https://u:p@x/d.dump
+      auth.dumpBaseUrl: https://example.com
+      auth.dumpPath: /d.dump
     asserts:
       - matchRegex:
           path: 'data["10-restore.sh"]'
@@ -30,10 +32,14 @@ tests:
       - matchRegex:
           path: 'data["10-restore.sh"]'
           pattern: 'touch "\$PGDATA/\.restore_complete"'
+      - matchRegex:
+          path: 'data["10-restore.sh"]'
+          pattern: 'rm -f "\$DUMP"'
 
   - it: wrapper checks the sentinel and exits non-zero on missing
     set:
-      auth.dumpUrl: https://u:p@x/d.dump
+      auth.dumpBaseUrl: https://example.com
+      auth.dumpPath: /d.dump
     asserts:
       - matchRegex:
           path: 'data["entrypoint-wrapper.sh"]'

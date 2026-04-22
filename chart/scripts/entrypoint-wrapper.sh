@@ -12,7 +12,7 @@ ERROR: A previous restore did not complete successfully.
        The database is in an inconsistent state and Postgres will not be started.
 
        To recover, delete the PVC and reinstall the chart:
-         kubectl delete pvc ${PG_PVC_NAME:-<release>-toggle-postgres-pg-data}
+         kubectl delete pvc ${PG_PVC_NAME:-<release>-tcpg-pg-data}
          helm upgrade --install ...
 ==============================================================================
 EOF

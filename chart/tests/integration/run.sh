@@ -34,7 +34,7 @@ run_pg() {
     -e PGDATA=/var/lib/postgresql/data/pgdata \
     -e PG_PVC_NAME=fake-pvc-name \
     -v "$pgdata:/var/lib/postgresql/data" \
-    -v "$dump_dir:/dump:ro" \
+    -v "$dump_dir:/dump" \
     -v "$SCRIPTS/10-restore.sh:/docker-entrypoint-initdb.d/10-restore.sh:ro" \
     -v "$SCRIPTS/entrypoint-wrapper.sh:/etc/postgres-wrapper/entrypoint-wrapper.sh:ro" \
     --entrypoint /bin/sh \
@@ -52,7 +52,7 @@ start_pg_detached() {
     -e PGDATA=/var/lib/postgresql/data/pgdata \
     -e PG_PVC_NAME=fake-pvc-name \
     -v "$pgdata:/var/lib/postgresql/data" \
-    -v "$dump_dir:/dump:ro" \
+    -v "$dump_dir:/dump" \
     -v "$SCRIPTS/10-restore.sh:/docker-entrypoint-initdb.d/10-restore.sh:ro" \
     -v "$SCRIPTS/entrypoint-wrapper.sh:/etc/postgres-wrapper/entrypoint-wrapper.sh:ro" \
     --entrypoint /bin/sh \

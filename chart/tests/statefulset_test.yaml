@@ -11,7 +11,7 @@ tests:
     asserts:
       - isKind: { of: StatefulSet }
       - equal: { path: spec.replicas, value: 1 }
-      - equal: { path: spec.serviceName, value: my-release-toggle-postgres }
+      - equal: { path: spec.serviceName, value: my-release-tcpg }
 
   - it: has hardened pod securityContext
     template: postgres.yaml
@@ -20,6 +20,30 @@ tests:
       - equal: { path: spec.template.spec.securityContext.runAsGroup, value: 999 }
       - equal: { path: spec.template.spec.securityContext.fsGroup, value: 999 }
       - equal: { path: spec.template.spec.securityContext.runAsNonRoot, value: true }
+      - equal: { path: spec.template.spec.securityContext.seccompProfile.type, value: RuntimeDefault }
+
+  - it: main container meets restricted PSS
+    template: postgres.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          value: [ALL]
+
+  - it: init container meets restricted PSS
+    template: postgres.yaml
+    set:
+      auth.dumpBaseUrl: https://example.com
+      auth.dumpPath: /d.dump
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - equal:
+          path: spec.template.spec.initContainers[0].securityContext.capabilities.drop
+          value: [ALL]
 
   - it: sets PGDATA to a subdirectory
     template: postgres.yaml
@@ -35,9 +59,28 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].envFrom[0].secretRef.name
-          value: my-release-toggle-postgres-credential
+          value: my-release-tcpg-credential
 
-  - it: omits initContainer, command override, and restore mounts when no dumpUrl
+  - it: main container envFrom does not reference the load-credential secret (no DUMP_AUTH_VALUE leak)
+    template: postgres.yaml
+    set:
+      auth.dumpBaseUrl: https://example.com
+      auth.dumpPath: /d.dump
+      auth.dumpAuth.type: basic
+      auth.dumpAuth.value: user:pw
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].envFrom
+          any: true
+          content:
+            secretRef:
+              name: my-release-tcpg-load-credential
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          any: true
+          content: { name: DUMP_AUTH_VALUE }
+
+  - it: omits initContainer, command override, and restore mounts when no dumpPath
     template: postgres.yaml
     asserts:
       - isNull: { path: spec.template.spec.initContainers }
@@ -55,10 +98,11 @@ tests:
           content:
             name: dump
 
-  - it: adds curl initContainer when dumpUrl is set
+  - it: adds curl initContainer with no-auth case when dumpAuth.type is none
     template: postgres.yaml
     set:
-      auth.dumpUrl: https://u:p@x/d.dump
+      auth.dumpBaseUrl: https://example.com
+      auth.dumpPath: /d.dump
     asserts:
       - equal:
           path: spec.template.spec.initContainers[0].name
@@ -66,17 +110,153 @@ tests:
       - matchRegex:
           path: spec.template.spec.initContainers[0].image
           pattern: '^curlimages/curl:'
-      - equal:
-          path: spec.template.spec.initContainers[0].env[0].name
-          value: DUMP_URL
-      - equal:
-          path: spec.template.spec.initContainers[0].env[0].valueFrom.secretKeyRef.key
-          value: DUMP_URL
+      - contains:
+          path: spec.template.spec.initContainers[0].env
+          content: { name: DUMP_BASE_URL, value: https://example.com }
+      - contains:
+          path: spec.template.spec.initContainers[0].env
+          content: { name: DUMP_PATH, value: /d.dump }
+      - contains:
+          path: spec.template.spec.initContainers[0].env
+          content: { name: DUMP_AUTH_TYPE, value: none }
+      - contains:
+          path: spec.template.spec.initContainers[0].env
+          content: { name: DUMP_INSECURE_SKIP_TLS_VERIFY, value: "false" }
+      - notContains:
+          path: spec.template.spec.initContainers[0].env
+          any: true
+          content: { name: DUMP_AUTH_VALUE }
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: 'case "\$DUMP_AUTH_TYPE"'
 
-  - it: overrides command to entrypoint wrapper when dumpUrl is set
+  - it: sets DUMP_INSECURE_SKIP_TLS_VERIFY to true when configured
     template: postgres.yaml
     set:
-      auth.dumpUrl: https://u:p@x/d.dump
+      auth.dumpBaseUrl: https://self-signed.example.com
+      auth.dumpPath: /d.dump
+      auth.dumpInsecureSkipTlsVerify: true
+    asserts:
+      - contains:
+          path: spec.template.spec.initContainers[0].env
+          content: { name: DUMP_INSECURE_SKIP_TLS_VERIFY, value: "true" }
+
+  - it: defaults DUMP_INSECURE_SKIP_TLS_VERIFY to false
+    template: postgres.yaml
+    set:
+      auth.dumpBaseUrl: https://example.com
+      auth.dumpPath: /d.dump
+    asserts:
+      - contains:
+          path: spec.template.spec.initContainers[0].env
+          content: { name: DUMP_INSECURE_SKIP_TLS_VERIFY, value: "false" }
+
+  - it: wires DUMP_AUTH_VALUE from chart-managed secret for basic auth
+    template: postgres.yaml
+    set:
+      auth.dumpBaseUrl: https://example.com
+      auth.dumpPath: /d.dump
+      auth.dumpAuth.type: basic
+      auth.dumpAuth.value: user:pw
+    asserts:
+      - contains:
+          path: spec.template.spec.initContainers[0].env
+          content: { name: DUMP_AUTH_TYPE, value: basic }
+      - contains:
+          path: spec.template.spec.initContainers[0].env
+          content:
+            name: DUMP_AUTH_VALUE
+            valueFrom:
+              secretKeyRef:
+                name: my-release-tcpg-load-credential
+                key: DUMP_AUTH_VALUE
+
+  - it: wires DUMP_AUTH_VALUE from externally-managed secret when configured
+    template: postgres.yaml
+    set:
+      auth.dumpBaseUrl: https://example.com
+      auth.dumpPath: /d.dump
+      auth.dumpAuth.type: bearer
+      auth.existingDumpAuthSecret.name: external-dump-auth
+      auth.existingDumpAuthSecret.key: my-token-key
+    asserts:
+      - contains:
+          path: spec.template.spec.initContainers[0].env
+          content: { name: DUMP_AUTH_TYPE, value: bearer }
+      - contains:
+          path: spec.template.spec.initContainers[0].env
+          content:
+            name: DUMP_AUTH_VALUE
+            valueFrom:
+              secretKeyRef:
+                name: external-dump-auth
+                key: my-token-key
+
+  - it: fails when dumpAuth.type is invalid
+    template: postgres.yaml
+    set:
+      auth.dumpBaseUrl: https://example.com
+      auth.dumpPath: /d.dump
+      auth.dumpAuth.type: oauth
+    asserts:
+      - failedTemplate:
+          errorMessage: "auth.dumpAuth.type must be one of: none, basic, bearer"
+
+  - it: fails when basic/bearer is set without a value source
+    template: postgres.yaml
+    set:
+      auth.dumpBaseUrl: https://example.com
+      auth.dumpPath: /d.dump
+      auth.dumpAuth.type: basic
+    asserts:
+      - failedTemplate:
+          errorMessage: "auth.dumpAuth.type is basic/bearer but no value source is configured; provide auth.dumpAuth.value or auth.existingDumpAuthSecret.name"
+
+  - it: fails when both inline and external auth value sources are set
+    template: postgres.yaml
+    set:
+      auth.dumpBaseUrl: https://example.com
+      auth.dumpPath: /d.dump
+      auth.dumpAuth.type: basic
+      auth.dumpAuth.value: user:pw
+      auth.existingDumpAuthSecret.name: external-dump-auth
+    asserts:
+      - failedTemplate:
+          errorMessage: "Set either auth.dumpAuth.value (inline) or auth.existingDumpAuthSecret.name (external), not both"
+
+  - it: fails when dumpBaseUrl and dumpPath would produce a double slash
+    template: postgres.yaml
+    set:
+      auth.dumpBaseUrl: https://example.com/
+      auth.dumpPath: /d.dump
+    asserts:
+      - failedTemplate:
+          errorMessage: "auth.dumpBaseUrl ends with '/' and auth.dumpPath starts with '/' — would produce '//' in URL; remove one"
+
+  - it: fails when dumpBaseUrl and dumpPath have no slash between them
+    template: postgres.yaml
+    set:
+      auth.dumpBaseUrl: https://example.com
+      auth.dumpPath: d.dump
+    asserts:
+      - failedTemplate:
+          errorMessage: "auth.dumpBaseUrl and auth.dumpPath have no slash between them; add trailing '/' to dumpBaseUrl or leading '/' to dumpPath"
+
+  - it: accepts trailing slash on dumpBaseUrl without leading slash on dumpPath
+    template: postgres.yaml
+    set:
+      auth.dumpBaseUrl: https://example.com/
+      auth.dumpPath: d.dump
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: download-dump
+
+  - it: overrides command to entrypoint wrapper when dumpPath is set
+    template: postgres.yaml
+    set:
+      auth.dumpBaseUrl: https://example.com
+      auth.dumpPath: /d.dump
     asserts:
       - equal:
           path: spec.template.spec.containers[0].command
@@ -88,14 +268,15 @@ tests:
           value:
             - postgres
 
-  - it: mounts dump, restore-script, and wrapper when dumpUrl is set
+  - it: mounts dump, restore-script, and wrapper when dumpPath is set
     template: postgres.yaml
     set:
-      auth.dumpUrl: https://u:p@x/d.dump
+      auth.dumpBaseUrl: https://example.com
+      auth.dumpPath: /d.dump
     asserts:
       - contains:
           path: spec.template.spec.containers[0].volumeMounts
-          content: { name: dump, mountPath: /dump, readOnly: true }
+          content: { name: dump, mountPath: /dump }
       - contains:
           path: spec.template.spec.containers[0].volumeMounts
           content: { name: restore-script, mountPath: /docker-entrypoint-initdb.d, readOnly: true }
@@ -122,10 +303,61 @@ tests:
       - exists:
           path: 'spec.template.metadata.annotations["checksum/secret"]'
 
-  - it: includes restore-script checksum annotation only when dumpUrl is set
+  - it: includes restore-script checksum annotation only when dumpPath is set
     template: postgres.yaml
     set:
-      auth.dumpUrl: https://u:p@x/d.dump
+      auth.dumpBaseUrl: https://example.com
+      auth.dumpPath: /d.dump
     asserts:
       - exists:
           path: 'spec.template.metadata.annotations["checksum/restore-script"]'
+
+  - it: omits affinity, tolerations, and nodeSelector by default
+    template: postgres.yaml
+    asserts:
+      - notExists: { path: spec.template.spec.affinity }
+      - notExists: { path: spec.template.spec.tolerations }
+      - notExists: { path: spec.template.spec.nodeSelector }
+
+  - it: renders affinity when set
+    template: postgres.yaml
+    set:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/os
+                    operator: In
+                    values: [linux]
+    asserts:
+      - equal:
+          path: spec.template.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].key
+          value: kubernetes.io/os
+
+  - it: renders tolerations when set
+    template: postgres.yaml
+    set:
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: db
+          effect: NoSchedule
+    asserts:
+      - contains:
+          path: spec.template.spec.tolerations
+          content:
+            key: dedicated
+            operator: Equal
+            value: db
+            effect: NoSchedule
+
+  - it: renders nodeSelector when set
+    template: postgres.yaml
+    set:
+      nodeSelector:
+        disktype: ssd
+    asserts:
+      - equal:
+          path: spec.template.spec.nodeSelector.disktype
+          value: ssd

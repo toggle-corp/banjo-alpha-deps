@@ -1,0 +1,26 @@
+resources:
+  requests:
+    cpu: 0.1
+    memory: 1Gi
+  limits:
+    cpu: 2
+    memory: 1Gi
+
+auth:
+  dumpInsecureSkipTlsVerify: true
+
+persistence:
+  enabled: true
+  storageClass: "local-path"
+  size: 1Gi  # NOTE: This doesn't matter for local-path
+
+affinity:
+  nodeAffinity:
+    # Use non disk-raid for alpha databases
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: "node.kubernetes.io/disk-raid"
+          operator: NotIn
+          values:
+            - "true"

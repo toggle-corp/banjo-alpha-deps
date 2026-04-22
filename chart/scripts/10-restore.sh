@@ -9,13 +9,14 @@ if [ ! -s "$DUMP" ]; then
   exit 0
 fi
 
-echo "Restoring from $DUMP ($(wc -c < "$DUMP") bytes)..."
+echo "Restoring from $DUMP..."
+du -sh "$DUMP"
 if gunzip -t "$DUMP" 2>/dev/null; then
   echo "Detected: gzip-compressed plain SQL"
   zcat "$DUMP" | psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"
 elif pg_restore -l "$DUMP" >/dev/null 2>&1; then
   echo "Detected: pg_dump custom format"
-  pg_restore --no-owner --no-acl --exit-on-error -U "$POSTGRES_USER" -d "$POSTGRES_DB" "$DUMP"
+  pg_restore -v --no-owner --no-privileges --exit-on-error -U "$POSTGRES_USER" -d "$POSTGRES_DB" "$DUMP"
 else
   echo "Detected: plain SQL"
   psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f "$DUMP"
@@ -25,3 +26,6 @@ fi
 # on subsequent starts to detect partial-restore states.
 touch "$PGDATA/.restore_complete"
 echo "Restore complete; sentinel written."
+
+rm -f "$DUMP"
+echo "Removed $DUMP."
