@@ -35,6 +35,22 @@ Helm chart: simple Postgres replacement for Bitnami chart.
 - [x] Multi-stack umbrella chart `banjo-alpha-deps`. tcpg stays DIY under `templates/tcpg/`; garage vendored from Deuxfleurs at `charts/garage/` (refresh via `./scripts/vendor-garage.sh`); dragonfly pulled from OCI `ghcr.io/dragonflydb/dragonfly/helm@v1.38.0`. All three gated via `<name>.enabled`. Resource names stay `<release>-tcpg-*` regardless of umbrella name. Tests rewritten to `tcpg.*` value paths.
 - [ ] Setup renovatebot for dependencies update tracking
 - [ ] **Verify Dragonfly OCI dep works under ArgoCD.** The chart is pulled from `oci://ghcr.io/dragonflydb/dragonfly/helm` and the `.tgz` is `.gitignore`d, so ArgoCD's repo-server has to run `helm dependency build` at sync time. Requires: (1) network egress from `argocd-repo-server` to `ghcr.io`, (2) OCI-enabled repo-server (default since v2.4). If the tc cluster blocks egress or strips OCI support, flip `charts/*.tgz` out of `.gitignore` and commit the tarball for fully-offline sync.
+- [ ] Setup bootstrapping for garagehq to support declarative config
+    ```
+    garagaBootstraper:
+      bukets:
+        - name: media
+        - name: static
+          acl: public  <-- default is private
+      credentialFromSecret:
+      credential:
+        access_key:
+        secret_key:
+    ```
+    - Define hook job (for both argocd and helm)
+        - auto create bucket
+        - auto create secrets
+            - Generate a secret from root chart and pass it to the garagahq chart
 
 ## Review follow-ups (2026-04-22)
 

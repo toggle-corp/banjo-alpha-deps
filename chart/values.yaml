@@ -1,5 +1,5 @@
 tcpg:
-  enabled: true
+  enabled: false
 
   # fullnameOverride: "my-postgres"
 
@@ -107,12 +107,3 @@ garage:
 # full surface: https://github.com/dragonflydb/dragonfly/blob/main/contrib/charts/dragonfly/values.yaml
 dragonfly:
   enabled: false
-  # Example overrides (uncomment + adjust when enabling):
-  # replicaCount: 1
-  # resources:
-  #   requests: { cpu: "100m", memory: "256Mi" }
-  #   limits:   { cpu: "1",    memory: "512Mi" }
-  # storage:
-  #   enabled: true
-  #   storageClassName: local-path
-  #   requests: 1Gi
