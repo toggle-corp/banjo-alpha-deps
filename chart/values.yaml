@@ -94,6 +94,13 @@ tcpg:
   # values if those charts support them.
   commonAnnotations: {}
 
+# Garage (S3-compatible object store). Vendored under charts/garage/ from
+# git.deuxfleurs.fr/Deuxfleurs/garage (upstream has not yet published a
+# standalone chart). Refresh with ./scripts/vendor-garage.sh.
+# Full upstream values: see chart/charts/garage/values.yaml.
+garage:
+  enabled: false
+
 # Dragonfly (Redis-compatible in-memory store). Pulled from the official OCI
 # chart at ghcr.io/dragonflydb/dragonfly/helm (version pinned in Chart.yaml).
 # Values are passed through to the subchart — see the upstream values for the

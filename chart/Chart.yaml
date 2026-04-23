@@ -10,3 +10,6 @@ dependencies:
     version: v1.38.0
     repository: oci://ghcr.io/dragonflydb/dragonfly/helm
     condition: dragonfly.enabled
+  - name: garage
+    version: 0.9.3  # tracks chart/charts/garage/Chart.yaml; bump via ./scripts/vendor-garage.sh
+    condition: garage.enabled

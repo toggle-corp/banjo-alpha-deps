@@ -10,7 +10,7 @@ repos:
       - id: mixed-line-ending
       - id: check-yaml
         # Helm templates contain Go templating, not valid YAML.
-        exclude: ^chart/templates/
+        exclude: ^(chart/templates/|chart/charts/)
 
   - repo: local
     hooks:

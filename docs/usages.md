@@ -235,6 +235,7 @@ kubectl -n <namespace> get secret <release>-tcpg-pg-credential \
 |------------|---------------------------------------------------------|----------------------|
 | tcpg       | DIY (this chart, `templates/tcpg/`)                     | `tcpg.enabled`       |
 | dragonfly  | `oci://ghcr.io/dragonflydb/dragonfly/helm`, pinned in `Chart.yaml` | `dragonfly.enabled` |
+| garage     | vendored under `charts/garage/` (upstream not yet published a Helm chart) | `garage.enabled`    |
 
 Dependencies are pulled with `helm dep update chart` (tarballs land in `chart/charts/*.tgz` and are `.gitignore`d — `Chart.lock` pins the versions).
 
@@ -252,6 +253,27 @@ dragonfly:
 ```
 
 Dragonfly Service DNS: `<release>-dragonfly.<namespace>.svc.cluster.local:6379`.
+
+### Enabling Garage
+
+Garage's upstream chart lives at `script/helm/garage/` inside the [Deuxfleurs/garage](https://git.deuxfleurs.fr/Deuxfleurs/garage) repo and is not published independently ([tracking issue](https://git.deuxfleurs.fr/Deuxfleurs/garage/issues/417)). We vendor it at `chart/charts/garage/` and pin the source commit in `chart/charts/garage/VENDORED_FROM.md`.
+
+To refresh to the latest `main-v2` HEAD, run:
+
+```bash
+./scripts/vendor-garage.sh
+```
+
+(Or `UPSTREAM_REF=<sha-or-tag> ./scripts/vendor-garage.sh` to pin to a specific ref.) Bump the version in `chart/Chart.yaml`'s `dependencies:` block to match `charts/garage/Chart.yaml`, then `helm dep update chart`.
+
+Minimal usage:
+
+```yaml
+garage:
+  enabled: true
+  # Any key under `garage:` is passed through to the vendored chart.
+  # See chart/charts/garage/values.yaml (and upstream README) for the full surface.
+```
 
 ## Caveats
 
