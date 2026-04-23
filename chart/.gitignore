@@ -1,1 +1,4 @@
 values.local.yaml
+
+# `helm dep update` output — tarballs are reproducible from Chart.lock.
+charts/*.tgz

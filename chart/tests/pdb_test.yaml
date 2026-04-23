@@ -1,6 +1,6 @@
 suite: pdb
 templates:
-  - pdb.yaml
+  - tcpg/pdb.yaml
 tests:
   - it: emits no PDB by default
     asserts:
@@ -8,7 +8,7 @@ tests:
 
   - it: emits PDB with minAvailable=1 when enabled
     set:
-      podDisruptionBudget.enabled: true
+      tcpg.podDisruptionBudget.enabled: true
     asserts:
       - isKind: { of: PodDisruptionBudget }
       - equal: { path: spec.minAvailable, value: 1 }

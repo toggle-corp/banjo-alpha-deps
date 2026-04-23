@@ -1,6 +1,6 @@
 apiVersion: v2
-name: tcpg
-description: "Helm Chart to deploy Simple Postgres (for alpha instances)"
+name: banjo-alpha-deps
+description: "Umbrella chart for alpha-environment dependencies (tcpg, garage, dragonfly)."
 type: application
 version: 0.0.1  # managed by release.sh
 sources:

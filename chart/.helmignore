@@ -1,1 +1,4 @@
 values.local.yaml
+
+# Docker integration test harness — not a Helm test, irrelevant to consumers.
+tests/integration/

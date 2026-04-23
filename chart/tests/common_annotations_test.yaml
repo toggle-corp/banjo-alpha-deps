@@ -1,61 +1,61 @@
 suite: commonAnnotations
 templates:
-  - postgres.yaml
-  - service.yaml
-  - pvc.yaml
-  - pdb.yaml
-  - secrets.yaml
-  - configmap.yaml
+  - tcpg/postgres.yaml
+  - tcpg/service.yaml
+  - tcpg/pvc.yaml
+  - tcpg/pdb.yaml
+  - tcpg/secrets.yaml
+  - tcpg/configmap.yaml
 release:
   name: my-release
 tests:
   - it: omits annotations on every resource by default
     set:
-      auth.dumpBaseUrl: https://example.com
-      auth.dumpPath: /d.dump
-      podDisruptionBudget.enabled: true
+      tcpg.auth.dumpBaseUrl: https://example.com
+      tcpg.auth.dumpPath: /d.dump
+      tcpg.podDisruptionBudget.enabled: true
     asserts:
-      - notExists: { path: metadata.annotations, template: postgres.yaml }
-      - notExists: { path: metadata.annotations, template: service.yaml }
-      - notExists: { path: metadata.annotations, template: pvc.yaml }
-      - notExists: { path: metadata.annotations, template: pdb.yaml }
-      - notExists: { path: metadata.annotations, template: secrets.yaml }
-      - notExists: { path: metadata.annotations, template: configmap.yaml }
+      - notExists: { path: metadata.annotations, template: tcpg/postgres.yaml }
+      - notExists: { path: metadata.annotations, template: tcpg/service.yaml }
+      - notExists: { path: metadata.annotations, template: tcpg/pvc.yaml }
+      - notExists: { path: metadata.annotations, template: tcpg/pdb.yaml }
+      - notExists: { path: metadata.annotations, template: tcpg/secrets.yaml }
+      - notExists: { path: metadata.annotations, template: tcpg/configmap.yaml }
 
   - it: applies commonAnnotations to every resource's metadata
     set:
-      auth.dumpBaseUrl: https://example.com
-      auth.dumpPath: /d.dump
-      podDisruptionBudget.enabled: true
-      commonAnnotations:
+      tcpg.auth.dumpBaseUrl: https://example.com
+      tcpg.auth.dumpPath: /d.dump
+      tcpg.podDisruptionBudget.enabled: true
+      tcpg.commonAnnotations:
         argocd.argoproj.io/sync-wave: "-1"
         helm.sh/hook-weight: "5"
     asserts:
       - equal:
           path: 'metadata.annotations["argocd.argoproj.io/sync-wave"]'
           value: "-1"
-          template: postgres.yaml
+          template: tcpg/postgres.yaml
       - equal:
           path: 'metadata.annotations["argocd.argoproj.io/sync-wave"]'
           value: "-1"
-          template: service.yaml
+          template: tcpg/service.yaml
       - equal:
           path: 'metadata.annotations["argocd.argoproj.io/sync-wave"]'
           value: "-1"
-          template: pvc.yaml
+          template: tcpg/pvc.yaml
       - equal:
           path: 'metadata.annotations["argocd.argoproj.io/sync-wave"]'
           value: "-1"
-          template: pdb.yaml
+          template: tcpg/pdb.yaml
       - equal:
           path: 'metadata.annotations["argocd.argoproj.io/sync-wave"]'
           value: "-1"
-          template: secrets.yaml
+          template: tcpg/secrets.yaml
       - equal:
           path: 'metadata.annotations["argocd.argoproj.io/sync-wave"]'
           value: "-1"
-          template: configmap.yaml
+          template: tcpg/configmap.yaml
       - equal:
           path: 'metadata.annotations["helm.sh/hook-weight"]'
           value: "5"
-          template: postgres.yaml
+          template: tcpg/postgres.yaml

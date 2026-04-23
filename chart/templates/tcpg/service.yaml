@@ -1,19 +1,21 @@
+{{- if .Values.tcpg.enabled }}
 apiVersion: v1
 kind: Service
 metadata:
   name: {{ template "tcpg.fullname" . }}
   labels:
     {{- include "tcpg.labels" . | nindent 4 }}
-  {{- with .Values.commonAnnotations }}
+  {{- with .Values.tcpg.commonAnnotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 spec:
-  type: {{ .Values.service.type }}
+  type: {{ .Values.tcpg.service.type }}
   ports:
-    - port: {{ .Values.service.port }}
+    - port: {{ .Values.tcpg.service.port }}
       targetPort: postgres
       protocol: TCP
       name: postgres
   selector:
     {{- include "tcpg.selectorLabels" . | nindent 4 }}
+{{- end }}

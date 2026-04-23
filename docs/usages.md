@@ -227,8 +227,18 @@ kubectl -n <namespace> get secret <release>-tcpg-pg-credential \
   -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d
 ```
 
+## Subcharts
+
+`banjo-alpha-deps` is an umbrella. tcpg is a DIY component rendered from `templates/tcpg/`. Garage and Dragonfly come in via Helm dependencies.
+
+| Component  | Source                                                  | Gate                 |
+|------------|---------------------------------------------------------|----------------------|
+| tcpg       | DIY (this chart, `templates/tcpg/`)                     | `tcpg.enabled`       |
+
+Dependencies are pulled with `helm dep update chart` (tarballs land in `chart/charts/*.tgz` and are `.gitignore`d — `Chart.lock` pins the versions).
 ## Caveats
 
 - **Single replica, no backup, no WAL archiving.** For alpha/dev only — not production-grade.
 - **No headless Service.** Per-pod DNS (`pod-0.svc.ns`) won't resolve. Apps must connect via the ClusterIP service name.
 - **Partial restore recovery is manual.** If restore fails mid-way, delete the PVC and reinstall — the wrapper will tell you so in logs.
+- **Benign `chmod: /var/run/postgresql: Operation not permitted` on pod start.** The official postgres image's entrypoint unconditionally tries `chmod 03775 /var/run/postgresql`. With `readOnlyRootFilesystem: true` we mount an `emptyDir` there (owned by `root:<fsGroup>` via k8s), and the non-root pg user can't chmod it. The entrypoint itself swallows the exit code (`|| :`) and the socket is still created correctly — it's a cosmetic line. Silencing it would require running an init container as root, which isn't worth the hardening tradeoff.

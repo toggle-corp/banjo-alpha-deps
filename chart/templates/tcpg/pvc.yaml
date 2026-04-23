@@ -1,0 +1,21 @@
+{{- if and .Values.tcpg.enabled .Values.tcpg.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ template "tcpg.fullname" . }}-pg-data
+  labels:
+    {{- include "tcpg.labels" . | nindent 4 }}
+  {{- with .Values.tcpg.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.tcpg.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  accessModes:
+    {{- toYaml .Values.tcpg.persistence.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ required "tcpg.persistence.size is required" .Values.tcpg.persistence.size | quote }}
+{{- end }}

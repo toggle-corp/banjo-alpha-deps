@@ -1,18 +1,22 @@
-{{/* Expand the name of the chart. */}}
+{{/*
+tcpg helpers. Resource names are kept at `<release>-tcpg-*` regardless of the
+umbrella chart name (`banjo-alpha-deps`), so "tcpg" is hardcoded below — the
+name helpers do not read `.Chart.Name`.
+*/}}
+
 {{- define "tcpg.name" -}}
-{{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
+{{- default "tcpg" .Values.tcpg.nameOverride | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
 {{/*
-Create a default fully qualified app name.
-Truncated at 63 chars to satisfy DNS-1123 label limits.
-If the release name already contains the chart name, it's used as-is.
+Fully qualified app name, truncated at 63 chars. If the release name already
+contains "tcpg", it's used as-is.
 */}}
 {{- define "tcpg.fullname" -}}
-{{- if .Values.fullnameOverride -}}
-{{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
+{{- if .Values.tcpg.fullnameOverride -}}
+{{- .Values.tcpg.fullnameOverride | trunc 63 | trimSuffix "-" -}}
 {{- else -}}
-{{- $name := default .Chart.Name .Values.nameOverride -}}
+{{- $name := include "tcpg.name" . -}}
 {{- if contains $name .Release.Name -}}
 {{- .Release.Name | trunc 63 | trimSuffix "-" -}}
 {{- else -}}
@@ -21,7 +25,7 @@ If the release name already contains the chart name, it's used as-is.
 {{- end -}}
 {{- end -}}
 
-{{/* Chart name + version, used as the chart label. */}}
+{{/* Umbrella chart name + version, used as the chart label. */}}
 {{- define "tcpg.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" -}}
 {{- end -}}

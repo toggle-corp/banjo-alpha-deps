@@ -1,90 +1,95 @@
-# fullnameOverride: "my-postgres"
-
-image:
-  repository: postgres
-  tag: "18.1"
-  pullPolicy: IfNotPresent
-  pullSecrets: []
-
-initImage:
-  repository: curlimages/curl
-  tag: "8.11.1"
-  pullPolicy: IfNotPresent
-
-resources: {}
-
-auth:
-  database: postgres
-  username: postgres
-  # If empty, a random password is generated on first install and preserved across upgrades.
-  password: ""
-  # Optional one-shot restore on first init. Effective URL is dumpBaseUrl + dumpPath,
-  # concatenated verbatim at runtime. Both are non-secret (plain env vars, visible
-  # in the pod spec). Empty dumpPath → no restore. Authentication is handled
-  # separately via dumpAuth below — do NOT embed credentials in the URL.
-  #
-  # Supports plain .sql, .sql.gz, `pg_dump -Fc`.
-  dumpBaseUrl: ""   # e.g. https://example.com
-  dumpPath: ""      # e.g. /dumps/prod/db.sql.gz
-  # Auth for the dump download.
-  #   type: none   — no auth header
-  #   type: basic  — value is "user:pass", passed via curl -u
-  #   type: bearer — value is the token, sent as Authorization: Bearer <value>
-  # Only dumpAuth.value is secret. Either set it inline (stored in the chart-
-  # managed Secret) OR reference an externally-managed Secret via
-  # existingDumpAuthSecret.{name,key}. The two are mutually exclusive.
-  dumpAuth:
-    type: none
-    value: ""
-  existingDumpAuthSecret:
-    name: ""
-    key: DUMP_AUTH_VALUE
-  # Skip TLS certificate verification for the dump download (curl -k). Use only
-  # when the dump server presents a self-signed or internal-CA cert. Verify the
-  # host out-of-band; this disables MITM protection for the download.
-  dumpInsecureSkipTlsVerify: false
-
-service:
-  type: ClusterIP
-  port: 5432
-
-persistence:
+tcpg:
   enabled: true
-  storageClass: ""
-  size: 10Gi
-  accessModes:
-    - ReadWriteOnce
 
-podSecurityContext:
-  runAsUser: 999
-  runAsGroup: 999
-  fsGroup: 999
-  runAsNonRoot: true
-  seccompProfile:
-    type: RuntimeDefault
+  # fullnameOverride: "my-postgres"
 
-# Applied to every container (init + main). Defaults satisfy the restricted
-# Pod Security Standard (PSS). The chart mounts emptyDirs at /tmp and (for
-# the main container) /var/run/postgresql so readOnlyRootFilesystem: true is
-# safe — Postgres writes only under $PGDATA, the unix-socket dir, and /tmp.
-containerSecurityContext:
-  allowPrivilegeEscalation: false
-  readOnlyRootFilesystem: true
-  capabilities:
-    drop:
-      - ALL
+  image:
+    repository: postgres
+    tag: "18.1"
+    pullPolicy: IfNotPresent
+    pullSecrets: []
 
-# Single-replica DB → PDB blocks voluntary node drains. Off by default; enable
-# only if you'd rather have a stuck drain than an automated DB restart.
-podDisruptionBudget:
-  enabled: false
+  initImage:
+    repository: curlimages/curl
+    tag: "8.11.1"
+    pullPolicy: IfNotPresent
 
-affinity: {}
+  resources: {}
 
-tolerations: []
+  auth:
+    database: postgres
+    username: postgres
+    # If empty, a random password is generated on first install and preserved across upgrades.
+    password: ""
+    # Optional one-shot restore on first init. Effective URL is dumpBaseUrl + dumpPath,
+    # concatenated verbatim at runtime. Both are non-secret (plain env vars, visible
+    # in the pod spec). Empty dumpPath → no restore. Authentication is handled
+    # separately via dumpAuth below — do NOT embed credentials in the URL.
+    #
+    # Supports plain .sql, .sql.gz, `pg_dump -Fc`.
+    dumpBaseUrl: ""   # e.g. https://example.com
+    dumpPath: ""      # e.g. /dumps/prod/db.sql.gz
+    # Auth for the dump download.
+    #   type: none   — no auth header
+    #   type: basic  — value is "user:pass", passed via curl -u
+    #   type: bearer — value is the token, sent as Authorization: Bearer <value>
+    # Only dumpAuth.value is secret. Either set it inline (stored in the chart-
+    # managed Secret) OR reference an externally-managed Secret via
+    # existingDumpAuthSecret.{name,key}. The two are mutually exclusive.
+    dumpAuth:
+      type: none
+      value: ""
+    existingDumpAuthSecret:
+      name: ""
+      key: DUMP_AUTH_VALUE
+    # Skip TLS certificate verification for the dump download (curl -k). Use only
+    # when the dump server presents a self-signed or internal-CA cert. Verify the
+    # host out-of-band; this disables MITM protection for the download.
+    dumpInsecureSkipTlsVerify: false
 
-nodeSelector: {}
+  service:
+    type: ClusterIP
+    port: 5432
 
-# Annotations applied to every resource's metadata. Useful for Argo CD
-# sync-waves (argocd.argoproj.io/sync-wave) or Helm hooks (helm.sh/hook).
-commonAnnotations: {}
+  persistence:
+    enabled: true
+    storageClass: ""
+    size: 10Gi
+    accessModes:
+      - ReadWriteOnce
+
+  podSecurityContext:
+    runAsUser: 999
+    runAsGroup: 999
+    fsGroup: 999
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+
+  # Applied to every container (init + main). Defaults satisfy the restricted
+  # Pod Security Standard (PSS). The chart mounts emptyDirs at /tmp and (for
+  # the main container) /var/run/postgresql so readOnlyRootFilesystem: true is
+  # safe — Postgres writes only under $PGDATA, the unix-socket dir, and /tmp.
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+
+  # Single-replica DB → PDB blocks voluntary node drains. Off by default; enable
+  # only if you'd rather have a stuck drain than an automated DB restart.
+  podDisruptionBudget:
+    enabled: false
+
+  affinity: {}
+
+  tolerations: []
+
+  nodeSelector: {}
+
+  # Annotations applied to every tcpg resource's metadata. Useful for Argo CD
+  # sync-waves (argocd.argoproj.io/sync-wave) or Helm hooks (helm.sh/hook).
+  # values if those charts support them.
+  commonAnnotations: {}
+

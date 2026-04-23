@@ -1,6 +1,6 @@
 suite: service
 templates:
-  - service.yaml
+  - tcpg/service.yaml
 tests:
   - it: renders ClusterIP service on port 5432 by default
     asserts:
@@ -13,8 +13,8 @@ tests:
 
   - it: respects service.type and service.port overrides
     set:
-      service.type: NodePort
-      service.port: 15432
+      tcpg.service.type: NodePort
+      tcpg.service.port: 15432
     asserts:
       - equal: { path: spec.type, value: NodePort }
       - equal: { path: 'spec.ports[0].port', value: 15432 }

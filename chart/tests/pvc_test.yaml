@@ -1,6 +1,6 @@
 suite: pvc
 templates:
-  - pvc.yaml
+  - tcpg/pvc.yaml
 tests:
   - it: defaults to ReadWriteOnce with the configured size
     asserts:
@@ -10,19 +10,19 @@ tests:
 
   - it: emits no PVC when persistence is disabled
     set:
-      persistence.enabled: false
+      tcpg.persistence.enabled: false
     asserts:
       - hasDocuments: { count: 0 }
 
   - it: fails when size is empty
     set:
-      persistence.size: ""
+      tcpg.persistence.size: ""
     asserts:
       - failedTemplate:
-          errorMessage: "persistence.size is required"
+          errorMessage: "tcpg.persistence.size is required"
 
   - it: applies storageClass when set
     set:
-      persistence.storageClass: gp3
+      tcpg.persistence.storageClass: gp3
     asserts:
       - equal: { path: spec.storageClassName, value: gp3 }

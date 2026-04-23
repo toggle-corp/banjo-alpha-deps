@@ -52,6 +52,7 @@ Helm chart: simple Postgres replacement for Bitnami chart.
                 enabled: false
                 ...
     - Also update the helm chart name to `banjo-alpha-deps`
+- [ ] Setup renovatebot for dependencies update tracking
 
 ## Review follow-ups (2026-04-22)
 

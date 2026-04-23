@@ -1,10 +1,11 @@
+{{- if .Values.tcpg.enabled }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: {{ template "tcpg.fullname" . }}
   labels:
     {{- include "tcpg.labels" . | nindent 4 }}
-  {{- with .Values.commonAnnotations }}
+  {{- with .Values.tcpg.commonAnnotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}
@@ -19,50 +20,50 @@ spec:
       labels:
         {{- include "tcpg.selectorLabels" . | nindent 8 }}
       annotations:
-        checksum/secret: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
-        {{- if .Values.auth.dumpPath }}
-        checksum/restore-script: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/tcpg/secrets.yaml") . | sha256sum }}
+        {{- if .Values.tcpg.auth.dumpPath }}
+        checksum/restore-script: {{ include (print $.Template.BasePath "/tcpg/configmap.yaml") . | sha256sum }}
         {{- end }}
     spec:
-      {{- with .Values.image.pullSecrets }}
+      {{- with .Values.tcpg.image.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       securityContext:
-        {{- toYaml .Values.podSecurityContext | nindent 8 }}
-      {{- if .Values.auth.dumpPath }}
-      {{- if not .Values.auth.dumpBaseUrl -}}
-      {{- fail "auth.dumpBaseUrl is required when auth.dumpPath is set" -}}
+        {{- toYaml .Values.tcpg.podSecurityContext | nindent 8 }}
+      {{- if .Values.tcpg.auth.dumpPath }}
+      {{- if not .Values.tcpg.auth.dumpBaseUrl -}}
+      {{- fail "tcpg.auth.dumpBaseUrl is required when tcpg.auth.dumpPath is set" -}}
       {{- end }}
-      {{- if not (has .Values.auth.dumpAuth.type (list "none" "basic" "bearer")) -}}
-      {{- fail "auth.dumpAuth.type must be one of: none, basic, bearer" -}}
+      {{- if not (has .Values.tcpg.auth.dumpAuth.type (list "none" "basic" "bearer")) -}}
+      {{- fail "tcpg.auth.dumpAuth.type must be one of: none, basic, bearer" -}}
       {{- end }}
-      {{- if eq .Values.auth.dumpAuth.type "none" }}
-      {{- if .Values.auth.existingDumpAuthSecret.name -}}
-      {{- fail "auth.existingDumpAuthSecret.name is set but auth.dumpAuth.type is 'none'; set type to basic/bearer or clear existingDumpAuthSecret.name" -}}
+      {{- if eq .Values.tcpg.auth.dumpAuth.type "none" }}
+      {{- if .Values.tcpg.auth.existingDumpAuthSecret.name -}}
+      {{- fail "tcpg.auth.existingDumpAuthSecret.name is set but tcpg.auth.dumpAuth.type is 'none'; set type to basic/bearer or clear existingDumpAuthSecret.name" -}}
       {{- end }}
       {{- else }}
-      {{- if and .Values.auth.dumpAuth.value .Values.auth.existingDumpAuthSecret.name -}}
-      {{- fail "Set either auth.dumpAuth.value (inline) or auth.existingDumpAuthSecret.name (external), not both" -}}
+      {{- if and .Values.tcpg.auth.dumpAuth.value .Values.tcpg.auth.existingDumpAuthSecret.name -}}
+      {{- fail "Set either tcpg.auth.dumpAuth.value (inline) or tcpg.auth.existingDumpAuthSecret.name (external), not both" -}}
       {{- end }}
-      {{- if and (not .Values.auth.dumpAuth.value) (not .Values.auth.existingDumpAuthSecret.name) -}}
-      {{- fail "auth.dumpAuth.type is basic/bearer but no value source is configured; provide auth.dumpAuth.value or auth.existingDumpAuthSecret.name" -}}
+      {{- if and (not .Values.tcpg.auth.dumpAuth.value) (not .Values.tcpg.auth.existingDumpAuthSecret.name) -}}
+      {{- fail "tcpg.auth.dumpAuth.type is basic/bearer but no value source is configured; provide tcpg.auth.dumpAuth.value or tcpg.auth.existingDumpAuthSecret.name" -}}
       {{- end }}
       {{- end }}
-      {{- $baseHasSlash := hasSuffix "/" .Values.auth.dumpBaseUrl -}}
-      {{- $pathHasSlash := hasPrefix "/" .Values.auth.dumpPath -}}
+      {{- $baseHasSlash := hasSuffix "/" .Values.tcpg.auth.dumpBaseUrl -}}
+      {{- $pathHasSlash := hasPrefix "/" .Values.tcpg.auth.dumpPath -}}
       {{- if and $baseHasSlash $pathHasSlash -}}
-      {{- fail "auth.dumpBaseUrl ends with '/' and auth.dumpPath starts with '/' — would produce '//' in URL; remove one" -}}
+      {{- fail "tcpg.auth.dumpBaseUrl ends with '/' and tcpg.auth.dumpPath starts with '/' — would produce '//' in URL; remove one" -}}
       {{- end }}
       {{- if and (not $baseHasSlash) (not $pathHasSlash) -}}
-      {{- fail "auth.dumpBaseUrl and auth.dumpPath have no slash between them; add trailing '/' to dumpBaseUrl or leading '/' to dumpPath" -}}
+      {{- fail "tcpg.auth.dumpBaseUrl and tcpg.auth.dumpPath have no slash between them; add trailing '/' to dumpBaseUrl or leading '/' to dumpPath" -}}
       {{- end }}
       initContainers:
         - name: download-dump
-          image: "{{ .Values.initImage.repository }}:{{ .Values.initImage.tag }}"
-          imagePullPolicy: {{ .Values.initImage.pullPolicy }}
+          image: "{{ .Values.tcpg.initImage.repository }}:{{ .Values.tcpg.initImage.tag }}"
+          imagePullPolicy: {{ .Values.tcpg.initImage.pullPolicy }}
           securityContext:
-            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+            {{- toYaml .Values.tcpg.containerSecurityContext | nindent 12 }}
           command:
             - sh
             - -c
@@ -103,20 +104,20 @@ spec:
               du -sh "$LOCAL_DUMP_PATH"
           env:
             - name: DUMP_BASE_URL
-              value: {{ .Values.auth.dumpBaseUrl | quote }}
+              value: {{ .Values.tcpg.auth.dumpBaseUrl | quote }}
             - name: DUMP_PATH
-              value: {{ .Values.auth.dumpPath | quote }}
+              value: {{ .Values.tcpg.auth.dumpPath | quote }}
             - name: DUMP_AUTH_TYPE
-              value: {{ .Values.auth.dumpAuth.type | quote }}
+              value: {{ .Values.tcpg.auth.dumpAuth.type | quote }}
             - name: DUMP_INSECURE_SKIP_TLS_VERIFY
-              value: {{ .Values.auth.dumpInsecureSkipTlsVerify | quote }}
-            {{- if ne .Values.auth.dumpAuth.type "none" }}
+              value: {{ .Values.tcpg.auth.dumpInsecureSkipTlsVerify | quote }}
+            {{- if ne .Values.tcpg.auth.dumpAuth.type "none" }}
             - name: DUMP_AUTH_VALUE
               valueFrom:
                 secretKeyRef:
-                  {{- if .Values.auth.existingDumpAuthSecret.name }}
-                  name: {{ .Values.auth.existingDumpAuthSecret.name | quote }}
-                  key: {{ .Values.auth.existingDumpAuthSecret.key | quote }}
+                  {{- if .Values.tcpg.auth.existingDumpAuthSecret.name }}
+                  name: {{ .Values.tcpg.auth.existingDumpAuthSecret.name | quote }}
+                  key: {{ .Values.tcpg.auth.existingDumpAuthSecret.key | quote }}
                   {{- else }}
                   name: {{ include "tcpg.loadSecretName" . }}
                   key: DUMP_AUTH_VALUE
@@ -132,11 +133,11 @@ spec:
       {{- end }}
       containers:
         - name: pg
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: "{{ .Values.tcpg.image.repository }}:{{ .Values.tcpg.image.tag }}"
+          imagePullPolicy: {{ .Values.tcpg.image.pullPolicy }}
           securityContext:
-            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
-          {{- if .Values.auth.dumpPath }}
+            {{- toYaml .Values.tcpg.containerSecurityContext | nindent 12 }}
+          {{- if .Values.tcpg.auth.dumpPath }}
           command:
             - /bin/sh
             - /etc/postgres-wrapper/entrypoint-wrapper.sh
@@ -150,7 +151,7 @@ spec:
           env:
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
-            {{- if .Values.auth.dumpPath }}
+            {{- if .Values.tcpg.auth.dumpPath }}
             - name: PG_PVC_NAME
               value: {{ template "tcpg.fullname" . }}-pg-data
             {{- end }}
@@ -184,7 +185,7 @@ spec:
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 3
-          {{- with .Values.resources }}
+          {{- with .Values.tcpg.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
@@ -195,7 +196,7 @@ spec:
               mountPath: /tmp
             - name: run-postgresql
               mountPath: /var/run/postgresql
-            {{- if .Values.auth.dumpPath }}
+            {{- if .Values.tcpg.auth.dumpPath }}
             # /dump is RW: 10-restore.sh deletes the dump after a successful restore to free the emptyDir.
             - name: dump
               mountPath: /dump
@@ -206,21 +207,21 @@ spec:
               mountPath: /etc/postgres-wrapper
               readOnly: true
             {{- end }}
-      {{- with .Values.affinity }}
+      {{- with .Values.tcpg.affinity }}
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.tolerations }}
+      {{- with .Values.tcpg.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.nodeSelector }}
+      {{- with .Values.tcpg.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       volumes:
         - name: pg-data
-          {{- if .Values.persistence.enabled }}
+          {{- if .Values.tcpg.persistence.enabled }}
           persistentVolumeClaim:
             claimName: {{ template "tcpg.fullname" . }}-pg-data
           {{- else }}
@@ -230,7 +231,7 @@ spec:
           emptyDir: {}
         - name: run-postgresql
           emptyDir: {}
-        {{- if .Values.auth.dumpPath }}
+        {{- if .Values.tcpg.auth.dumpPath }}
         - name: dump
           emptyDir: {}
         - name: restore-script
@@ -248,3 +249,4 @@ spec:
               - key: entrypoint-wrapper.sh
                 path: entrypoint-wrapper.sh
         {{- end }}
+{{- end }}

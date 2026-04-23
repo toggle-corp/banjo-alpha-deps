@@ -1,11 +1,11 @@
-{{- if .Values.auth.dumpPath }}
+{{- if and .Values.tcpg.enabled .Values.tcpg.auth.dumpPath }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: {{ template "tcpg.fullname" . }}-restore
   labels:
     {{- include "tcpg.labels" . | nindent 4 }}
-  {{- with .Values.commonAnnotations }}
+  {{- with .Values.tcpg.commonAnnotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}

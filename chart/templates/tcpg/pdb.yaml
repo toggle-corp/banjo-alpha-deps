@@ -1,11 +1,11 @@
-{{- if .Values.podDisruptionBudget.enabled }}
+{{- if and .Values.tcpg.enabled .Values.tcpg.podDisruptionBudget.enabled }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: {{ template "tcpg.fullname" . }}
   labels:
     {{- include "tcpg.labels" . | nindent 4 }}
-  {{- with .Values.commonAnnotations }}
+  {{- with .Values.tcpg.commonAnnotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}
