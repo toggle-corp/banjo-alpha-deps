@@ -64,9 +64,12 @@ podSecurityContext:
     type: RuntimeDefault
 
 # Applied to every container (init + main). Defaults satisfy the restricted
-# Pod Security Standard (PSS).
+# Pod Security Standard (PSS). The chart mounts emptyDirs at /tmp and (for
+# the main container) /var/run/postgresql so readOnlyRootFilesystem: true is
+# safe — Postgres writes only under $PGDATA, the unix-socket dir, and /tmp.
 containerSecurityContext:
   allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
   capabilities:
     drop:
       - ALL

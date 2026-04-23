@@ -29,8 +29,23 @@ tests:
           path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
           value: false
       - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - equal:
           path: spec.template.spec.containers[0].securityContext.capabilities.drop
           value: [ALL]
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content: { name: tmp, mountPath: /tmp }
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content: { name: run-postgresql, mountPath: /var/run/postgresql }
+      - contains:
+          path: spec.template.spec.volumes
+          content: { name: tmp, emptyDir: {} }
+      - contains:
+          path: spec.template.spec.volumes
+          content: { name: run-postgresql, emptyDir: {} }
 
   - it: init container meets restricted PSS
     template: postgres.yaml
@@ -42,8 +57,14 @@ tests:
           path: spec.template.spec.initContainers[0].securityContext.allowPrivilegeEscalation
           value: false
       - equal:
+          path: spec.template.spec.initContainers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - equal:
           path: spec.template.spec.initContainers[0].securityContext.capabilities.drop
           value: [ALL]
+      - contains:
+          path: spec.template.spec.initContainers[0].volumeMounts
+          content: { name: tmp, mountPath: /tmp }
 
   - it: sets PGDATA to a subdirectory
     template: postgres.yaml
@@ -59,7 +80,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].envFrom[0].secretRef.name
-          value: my-release-tcpg-credential
+          value: my-release-tcpg-pg-credential
 
   - it: main container envFrom does not reference the load-credential secret (no DUMP_AUTH_VALUE leak)
     template: postgres.yaml
@@ -223,6 +244,24 @@ tests:
     asserts:
       - failedTemplate:
           errorMessage: "Set either auth.dumpAuth.value (inline) or auth.existingDumpAuthSecret.name (external), not both"
+
+  - it: fails when dumpPath is set but dumpBaseUrl is empty
+    template: postgres.yaml
+    set:
+      auth.dumpPath: /d.dump
+    asserts:
+      - failedTemplate:
+          errorMessage: "auth.dumpBaseUrl is required when auth.dumpPath is set"
+
+  - it: fails when existingDumpAuthSecret.name is set but dumpAuth.type is none
+    template: postgres.yaml
+    set:
+      auth.dumpBaseUrl: https://example.com
+      auth.dumpPath: /d.dump
+      auth.existingDumpAuthSecret.name: external-dump-auth
+    asserts:
+      - failedTemplate:
+          errorMessage: "auth.existingDumpAuthSecret.name is set but auth.dumpAuth.type is 'none'; set type to basic/bearer or clear existingDumpAuthSecret.name"
 
   - it: fails when dumpBaseUrl and dumpPath would produce a double slash
     template: postgres.yaml

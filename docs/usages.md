@@ -91,12 +91,12 @@ affinity:
 - `auth.database` (default `postgres`) — DB created by the entrypoint.
 - `auth.username` (default `postgres`) — superuser created by the entrypoint.
 - `auth.password` — if empty, a random 32-char password is generated on first install. It's preserved across upgrades via a `lookup` on the existing Secret, so setting it empty is safe for rotation-free operation.
-- `auth.dumpBaseUrl` + `auth.dumpPath` — optional. Concatenated verbatim into the dump URL. Empty `dumpPath` disables restore. Both are non-secret (plain env vars in the pod spec) — do **not** embed credentials in the URL.
+- `auth.dumpBaseUrl` + `auth.dumpPath` — optional. Concatenated verbatim into the dump URL. Empty `dumpPath` disables restore; if `dumpPath` is set, `dumpBaseUrl` is required. Both are non-secret (plain env vars in the pod spec) — do **not** embed credentials in the URL.
 - `auth.dumpAuth.type` ∈ `none | basic | bearer`:
   - `none` — no auth header.
   - `basic` — `value` is `user:pass`, passed as `curl -u`.
   - `bearer` — `value` is the token, sent as `Authorization: Bearer <value>`.
-- `auth.dumpAuth.value` — the only secret. Stored in a dedicated chart-managed Secret named `<release>-tcpg-load-credential` (separate from the main `<release>-tcpg-credential` that Postgres reads — prevents the dump auth from leaking into the Postgres container env).
+- `auth.dumpAuth.value` — the only secret. Stored in a dedicated chart-managed Secret named `<release>-tcpg-load-credential` (separate from the main `<release>-tcpg-pg-credential` that Postgres reads — prevents the dump auth from leaking into the Postgres container env).
 - `auth.existingDumpAuthSecret.{name,key}` — alternative: reference a pre-existing Secret instead of setting `dumpAuth.value` inline. Mutually exclusive with inline; template validation fails hard if both are set.
 - `auth.dumpInsecureSkipTlsVerify` (default `false`) — `curl -k` for the download. Use only for internal / self-signed hosts.
 
@@ -122,7 +122,7 @@ auth:
   dumpPath: "/path/to/init-db.dump"
   dumpAuth:
     type: basic      # or bearer — must match the value's format
-    value: ""        # leave empty or exclude when using existingDumpAuthSecret
+    # omit `value` when using existingDumpAuthSecret below
   existingDumpAuthSecret:
     name: dump-credentials
     key: DUMP_AUTH_VALUE   # default; override if your Secret uses a different key
@@ -190,7 +190,7 @@ commonAnnotations:
 ### Security contexts
 
 - `podSecurityContext` — pod-level. Defaults to non-root (999/999/999), `runAsNonRoot: true`, `seccompProfile: RuntimeDefault`.
-- `containerSecurityContext` — applied to every container (init + main). Defaults satisfy the restricted Pod Security Standard (`allowPrivilegeEscalation: false`, `drop: [ALL]`).
+- `containerSecurityContext` — applied to every container (init + main). Defaults satisfy the restricted Pod Security Standard (`allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, `drop: [ALL]`). The chart mounts `emptyDir`s at `/tmp` (init + main) and `/var/run/postgresql` (main, for the unix socket) so Postgres has only `$PGDATA` + those two writable paths.
 
 Override only if you know why.
 
@@ -201,16 +201,29 @@ Override only if you know why.
 
 ## Connecting
 
-Connection string (default DB / user):
+The chart renders a consumer-facing Secret `<release>-tcpg-pg-credential` with everything an app needs. Keys:
 
-```
-postgres://postgres:<password>@<release>-tcpg.<namespace>.svc.cluster.local:5432/postgres
+| Key                 | Value                                                           |
+|---------------------|-----------------------------------------------------------------|
+| `POSTGRES_HOST`     | `<release>-tcpg.<namespace>.svc.cluster.local`                  |
+| `POSTGRES_PORT`     | `5432` (or `service.port` override)                             |
+| `POSTGRES_DB`       | `auth.database`                                                 |
+| `POSTGRES_USER`     | `auth.username`                                                 |
+| `POSTGRES_PASSWORD` | `auth.password` (or the 32-char autogen value)                  |
+| `POSTGRES_URI`      | `postgres://<user>:<pass>@<host>:<port>/<db>` (URL-encoded)     |
+
+App pods can bind the whole thing via `envFrom`:
+
+```yaml
+envFrom:
+  - secretRef:
+      name: <release>-tcpg-pg-credential
 ```
 
-Fetch the generated password:
+Fetch the generated password manually:
 
 ```bash
-kubectl -n <namespace> get secret <release>-tcpg-credential \
+kubectl -n <namespace> get secret <release>-tcpg-pg-credential \
   -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d
 ```
 

@@ -31,8 +31,27 @@ Helm chart: simple Postgres replacement for Bitnami chart.
 - [x] **`prepush.sh`** — single entry point that runs everything: `pre-commit run --all-files`, explicit `shellcheck` on all `.sh` files (covers untracked ones that pre-commit skips), then the Docker integration suite. Run before pushing: `./prepush.sh`.
 - [x] **Add support for annotations for argo/helm hooks** — `commonAnnotations` value applied to every resource's metadata (StatefulSet, Service, PVC, PDB, Secret, ConfigMap). Enables Argo sync-waves, Helm hooks, etc. Covered by `tests/common_annotations_test.yaml`.
 - [ ] Setup CI using woodpecker for running pre-push.sh checks
-- [ ] Auto generate pg credentials (pg username, pg password, pg host, pg port, pg database) secret so that application can directly use them
-    - This should also update the dump load credential name.. maybe `-load-credential`? and `-pg-credential`. Use cnpg for pattern
+- [x] Auto generate pg credentials secret for consumers. Renamed `<fullname>-credential` → `<fullname>-pg-credential`; added `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_URI` (URL-encoded) keys. Apps bind via `envFrom`. Helper renamed `tcpg.secretname` → `tcpg.pgSecretName`. Tests + docs updated.
+- [ ] [High effort]
+    - Change this to multi stack deployment
+        - create banjo-resources: which should include
+            - tcpg
+                - using templates/tcpg/...
+            - garagqhq helm chart
+            - dragonfly helm chart
+            -
+        - values should be
+            -
+              garagqhq:
+                enabled: false
+                ...
+              tcpg:
+                enabled: false
+                ...
+              dragonfly:
+                enabled: false
+                ...
+    - Also update the helm chart name to `banjo-alpha-deps`
 
 ## Review follow-ups (2026-04-22)
 
@@ -56,7 +75,26 @@ Chart hasn't been deployed yet, so no migration/compat concerns.
 
 ### Follow-up (not blocking)
 
-- [ ] Consider `containerSecurityContext.readOnlyRootFilesystem: true`. Needs `emptyDir` mounts for `/tmp` (and possibly `/run`); Postgres itself writes only under `$PGDATA`.
+- [x] `containerSecurityContext.readOnlyRootFilesystem: true` enabled by default. Added `emptyDir` mounts for `/tmp` (init + main) and `/var/run/postgresql` (main, unix socket). Integration test now passes `--read-only --tmpfs /tmp --tmpfs /var/run/postgresql` to match. Unittest asserts the flag + mounts on both containers.
+
+## Review follow-ups (2026-04-23)
+
+From review of `b9a228b feat: improvements - 02`.
+
+### Correctness / security
+
+- [x] **Validate `dumpBaseUrl` when `dumpPath` is set.** Template now fails with "auth.dumpBaseUrl is required when auth.dumpPath is set" before the slash-XOR check. Covered by a failedTemplate test.
+- [x] **Quote the `INSECURE` curl flag safely.** Replaced `curl $INSECURE …` word-splitting with a `curl_download()` helper that branches on `$DUMP_INSECURE_SKIP_TLS_VERIFY` and forwards `"$@"`.
+
+### Polish
+
+- [x] `existingDumpAuthSecret.name` + `dumpAuth.type: none` now fails template with a clear message. Covered by a failedTemplate test.
+- [x] `docs/usages.md` external-secret example: dropped `value: ""` in favor of an "omit `value`" comment.
+- [x] Revisit `/dump` `readOnly: true` on the main container. Decision: keep RW. Restore runs in the main container (via `/docker-entrypoint-initdb.d`), so cleanup has to happen there too — init-container cleanup would run before the restore, not after. Added a comment at the mount site explaining the intent.
+
+### Test gaps
+
+- [x] Added a failedTemplate test for the "dumpPath set, dumpBaseUrl empty" case in `statefulset_test.yaml`.
 
 ## Known caveats
 

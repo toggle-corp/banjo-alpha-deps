@@ -26,8 +26,8 @@ If the release name already contains the chart name, it's used as-is.
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
-{{- define "tcpg.secretname" -}}
-{{- printf "%s-credential" (include "tcpg.fullname" .) -}}
+{{- define "tcpg.pgSecretName" -}}
+{{- printf "%s-pg-credential" (include "tcpg.fullname" .) -}}
 {{- end -}}
 
 {{- define "tcpg.loadSecretName" -}}

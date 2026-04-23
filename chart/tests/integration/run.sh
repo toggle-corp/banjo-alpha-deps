@@ -33,6 +33,9 @@ run_pg() {
     -e POSTGRES_DB=testdb \
     -e PGDATA=/var/lib/postgresql/data/pgdata \
     -e PG_PVC_NAME=fake-pvc-name \
+    --read-only \
+    --tmpfs /tmp \
+    --tmpfs /var/run/postgresql \
     -v "$pgdata:/var/lib/postgresql/data" \
     -v "$dump_dir:/dump" \
     -v "$SCRIPTS/10-restore.sh:/docker-entrypoint-initdb.d/10-restore.sh:ro" \
@@ -51,6 +54,9 @@ start_pg_detached() {
     -e POSTGRES_DB=testdb \
     -e PGDATA=/var/lib/postgresql/data/pgdata \
     -e PG_PVC_NAME=fake-pvc-name \
+    --read-only \
+    --tmpfs /tmp \
+    --tmpfs /var/run/postgresql \
     -v "$pgdata:/var/lib/postgresql/data" \
     -v "$dump_dir:/dump" \
     -v "$SCRIPTS/10-restore.sh:/docker-entrypoint-initdb.d/10-restore.sh:ro" \

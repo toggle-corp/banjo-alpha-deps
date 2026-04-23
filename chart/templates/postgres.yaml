@@ -31,10 +31,17 @@ spec:
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       {{- if .Values.auth.dumpPath }}
+      {{- if not .Values.auth.dumpBaseUrl -}}
+      {{- fail "auth.dumpBaseUrl is required when auth.dumpPath is set" -}}
+      {{- end }}
       {{- if not (has .Values.auth.dumpAuth.type (list "none" "basic" "bearer")) -}}
       {{- fail "auth.dumpAuth.type must be one of: none, basic, bearer" -}}
       {{- end }}
-      {{- if ne .Values.auth.dumpAuth.type "none" }}
+      {{- if eq .Values.auth.dumpAuth.type "none" }}
+      {{- if .Values.auth.existingDumpAuthSecret.name -}}
+      {{- fail "auth.existingDumpAuthSecret.name is set but auth.dumpAuth.type is 'none'; set type to basic/bearer or clear existingDumpAuthSecret.name" -}}
+      {{- end }}
+      {{- else }}
       {{- if and .Values.auth.dumpAuth.value .Values.auth.existingDumpAuthSecret.name -}}
       {{- fail "Set either auth.dumpAuth.value (inline) or auth.existingDumpAuthSecret.name (external), not both" -}}
       {{- end }}
@@ -42,7 +49,6 @@ spec:
       {{- fail "auth.dumpAuth.type is basic/bearer but no value source is configured; provide auth.dumpAuth.value or auth.existingDumpAuthSecret.name" -}}
       {{- end }}
       {{- end }}
-      {{- if .Values.auth.dumpBaseUrl }}
       {{- $baseHasSlash := hasSuffix "/" .Values.auth.dumpBaseUrl -}}
       {{- $pathHasSlash := hasPrefix "/" .Values.auth.dumpPath -}}
       {{- if and $baseHasSlash $pathHasSlash -}}
@@ -50,7 +56,6 @@ spec:
       {{- end }}
       {{- if and (not $baseHasSlash) (not $pathHasSlash) -}}
       {{- fail "auth.dumpBaseUrl and auth.dumpPath have no slash between them; add trailing '/' to dumpBaseUrl or leading '/' to dumpPath" -}}
-      {{- end }}
       {{- end }}
       initContainers:
         - name: download-dump
@@ -70,20 +75,25 @@ spec:
               fi
               FULL_URL="${DUMP_BASE_URL}${DUMP_PATH}"
               echo "Downloading dump from $FULL_URL... -> $LOCAL_DUMP_PATH"
-              INSECURE=""
+              curl_download() {
+                if [ "$DUMP_INSECURE_SKIP_TLS_VERIFY" = "true" ]; then
+                  curl -k -D - -fsSL --retry 3 --retry-delay 5 "$@"
+                else
+                  curl -D - -fsSL --retry 3 --retry-delay 5 "$@"
+                fi
+              }
               if [ "$DUMP_INSECURE_SKIP_TLS_VERIFY" = "true" ]; then
                 echo "WARNING: TLS certificate verification is disabled (-k)"
-                INSECURE="-k"
               fi
               case "$DUMP_AUTH_TYPE" in
                 basic)
-                  curl $INSECURE -D - -fsSL --retry 3 --retry-delay 5 -u "$DUMP_AUTH_VALUE" -o "$LOCAL_DUMP_PATH" "$FULL_URL"
+                  curl_download -u "$DUMP_AUTH_VALUE" -o "$LOCAL_DUMP_PATH" "$FULL_URL"
                   ;;
                 bearer)
-                  curl $INSECURE -D - -fsSL --retry 3 --retry-delay 5 -H "Authorization: Bearer $DUMP_AUTH_VALUE" -o "$LOCAL_DUMP_PATH" "$FULL_URL"
+                  curl_download -H "Authorization: Bearer $DUMP_AUTH_VALUE" -o "$LOCAL_DUMP_PATH" "$FULL_URL"
                   ;;
                 none)
-                  curl $INSECURE -D - -fsSL --retry 3 --retry-delay 5 -o "$LOCAL_DUMP_PATH" "$FULL_URL"
+                  curl_download -o "$LOCAL_DUMP_PATH" "$FULL_URL"
                   ;;
                 *)
                   echo "Unknown DUMP_AUTH_TYPE: $DUMP_AUTH_TYPE (expected none, basic, bearer)" >&2
@@ -117,6 +127,8 @@ spec:
               mountPath: /dump
             - name: pg-data
               mountPath: /var/lib/postgresql/data
+            - name: tmp
+              mountPath: /tmp
       {{- end }}
       containers:
         - name: pg
@@ -144,7 +156,7 @@ spec:
             {{- end }}
           envFrom:
             - secretRef:
-                name: {{ template "tcpg.secretname" . }}
+                name: {{ template "tcpg.pgSecretName" . }}
           startupProbe:
             exec:
               command:
@@ -179,7 +191,12 @@ spec:
           volumeMounts:
             - name: pg-data
               mountPath: /var/lib/postgresql/data
+            - name: tmp
+              mountPath: /tmp
+            - name: run-postgresql
+              mountPath: /var/run/postgresql
             {{- if .Values.auth.dumpPath }}
+            # /dump is RW: 10-restore.sh deletes the dump after a successful restore to free the emptyDir.
             - name: dump
               mountPath: /dump
             - name: restore-script
@@ -209,6 +226,10 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
+        - name: tmp
+          emptyDir: {}
+        - name: run-postgresql
+          emptyDir: {}
         {{- if .Values.auth.dumpPath }}
         - name: dump
           emptyDir: {}
