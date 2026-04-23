@@ -5,3 +5,8 @@ type: application
 version: 0.0.1  # managed by release.sh
 sources:
   - https://gitea.local.togglecorp.com/tc-infra/tcpg
+dependencies:
+  - name: dragonfly
+    version: v1.38.0
+    repository: oci://ghcr.io/dragonflydb/dragonfly/helm
+    condition: dragonfly.enabled

@@ -234,8 +234,25 @@ kubectl -n <namespace> get secret <release>-tcpg-pg-credential \
 | Component  | Source                                                  | Gate                 |
 |------------|---------------------------------------------------------|----------------------|
 | tcpg       | DIY (this chart, `templates/tcpg/`)                     | `tcpg.enabled`       |
+| dragonfly  | `oci://ghcr.io/dragonflydb/dragonfly/helm`, pinned in `Chart.yaml` | `dragonfly.enabled` |
 
 Dependencies are pulled with `helm dep update chart` (tarballs land in `chart/charts/*.tgz` and are `.gitignore`d — `Chart.lock` pins the versions).
+
+### Enabling Dragonfly
+
+```yaml
+dragonfly:
+  enabled: true
+  # Any key under `dragonfly:` is passed through to the upstream chart.
+  # Full upstream values: https://github.com/dragonflydb/dragonfly/blob/main/contrib/charts/dragonfly/values.yaml
+  replicaCount: 1
+  resources:
+    requests: { cpu: "100m", memory: "256Mi" }
+    limits:   { cpu: "1",    memory: "512Mi" }
+```
+
+Dragonfly Service DNS: `<release>-dragonfly.<namespace>.svc.cluster.local:6379`.
+
 ## Caveats
 
 - **Single replica, no backup, no WAL archiving.** For alpha/dev only — not production-grade.

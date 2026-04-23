@@ -90,6 +90,22 @@ tcpg:
 
   # Annotations applied to every tcpg resource's metadata. Useful for Argo CD
   # sync-waves (argocd.argoproj.io/sync-wave) or Helm hooks (helm.sh/hook).
+  # Does NOT propagate to garage/dragonfly subcharts — use their own annotation
   # values if those charts support them.
   commonAnnotations: {}
 
+# Dragonfly (Redis-compatible in-memory store). Pulled from the official OCI
+# chart at ghcr.io/dragonflydb/dragonfly/helm (version pinned in Chart.yaml).
+# Values are passed through to the subchart — see the upstream values for the
+# full surface: https://github.com/dragonflydb/dragonfly/blob/main/contrib/charts/dragonfly/values.yaml
+dragonfly:
+  enabled: false
+  # Example overrides (uncomment + adjust when enabling):
+  # replicaCount: 1
+  # resources:
+  #   requests: { cpu: "100m", memory: "256Mi" }
+  #   limits:   { cpu: "1",    memory: "512Mi" }
+  # storage:
+  #   enabled: true
+  #   storageClassName: local-path
+  #   requests: 1Gi

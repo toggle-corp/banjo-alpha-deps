@@ -27,3 +27,29 @@ tcpg:
             values:
               - "true"
 
+dragonfly:
+  fullnameOverride: "dragonfly"
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 0.1
+      memory: 256Mi
+    limits:
+      cpu: 2
+      memory: 512Mi
+
+  storage:
+    enabled: true
+    storageClassName: "local-path"
+    requests: 128Mi  # NOTE: This doesn't matter for local-path
+
+  affinity:
+    nodeAffinity:
+      # Use non disk-raid for alpha databases
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: "node.kubernetes.io/disk-raid"
+            operator: NotIn
+            values:
+              - "true"
