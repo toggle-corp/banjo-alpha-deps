@@ -96,6 +96,11 @@ garage:
 # MinIO standalone for alpha. Image-repository overrides to bitnamilegacy/*
 # live in the chart's top-level values.yaml — alpha just picks the topology.
 minio:
+  # Your per-install overlay MUST set `minio.ingress.hostname` to the real S3 API
+  # host. The parent chart derives S3_ENDPOINT_URL from it (see
+  # templates/minio/secret.yaml); rendering fails closed if it's left at the
+  # `minio.local` placeholder (or set minioConfig.endpointUrl explicitly).
+  #
   # Stable name → API DNS: `minio.<namespace>.svc.cluster.local:9000`.
   fullnameOverride: "minio"
   disableWebUI: true
@@ -106,10 +111,6 @@ minio:
     enabled: true
     annotations:
       nginx.ingress.kubernetes.io/proxy-body-size: "50m"
-  auth:
-    # Overlay must set rootPassword (or existingSecret) — chart fails closed
-    # with `forcePassword: true` if neither is provided.
-    forcePassword: true
   defaultBuckets: ""
   provisioning:
     enabled: true

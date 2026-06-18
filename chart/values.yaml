@@ -128,6 +128,13 @@ dragonfly:
 # Images subscription, or migrate off the Bitnami chart entirely.
 minio:
   enabled: false
+  auth:
+    # The parent chart generates this secret (see templates/minio/secret.yaml) and
+    # MinIO reads its root creds back from it. Single source of truth: the secret
+    # is NAMED after this value. App consumes the same secret via envFrom.
+    existingSecret: minio-s3-credential
+    rootUserSecretKey: S3_ACCESS_KEY_ID
+    rootPasswordSecretKey: S3_SECRET_ACCESS_KEY
   image:
     repository: bitnamilegacy/minio
   clientImage:
@@ -141,3 +148,22 @@ minio:
       # overlay doesn't silently fall back to the gated bitnami/os-shell repo.
       image:
         repository: bitnamilegacy/os-shell
+
+# Parent-chart-managed MinIO/S3 credentials. The chart renders a single Secret
+# (templates/minio/secret.yaml, named after minio.auth.existingSecret) exposing
+# S3_ENDPOINT_URL / S3_REGION / S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY. The app
+# binds it via envFrom; MinIO reads the access key / secret key back as its root
+# user / password. One secret, no drift.
+minioConfig:
+  # Fixed access key id (like a username — not secret, not random). Becomes
+  # S3_ACCESS_KEY_ID and MinIO's root user.
+  accessKeyId: minio
+  # Empty → randAlphaNum 32 generated on first install, preserved across upgrades
+  # via lookup. Set to rotate (requires manual minio + app pod restart).
+  secretAccessKey: ""
+  region: us-east-1
+  endpointScheme: https
+  # Explicit S3_ENDPOINT_URL override. Empty → derived as
+  # "<endpointScheme>://<minio.ingress.hostname>". Set this for in-cluster svc
+  # endpoints or non-ingress setups.
+  endpointUrl: ""

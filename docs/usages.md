@@ -16,7 +16,7 @@ Apps connect via the ClusterIP service: `mydb-tcpg.<namespace>.svc.cluster.local
 
 ## Alpha environment (tc cluster)
 
-The chart ships a ready-to-use base for alpha deploys at `chart/values/alpha.yaml`: modest resource requests, `local-path` storage, a nodeAffinity rule that avoids RAID nodes, and `dumpInsecureSkipTlsVerify: true` for internal dump hosts. It does **not** set credentials or a dump URL — layer your own overlay on top:
+The chart ships a ready-to-use base for alpha deploys at `chart/values/alpha.yaml`: modest resource requests, `local-path` storage, a nodeAffinity rule that avoids RAID nodes, and `dumpInsecureSkipTlsVerify: true` for internal dump hosts. It does **not** set credentials or a dump URL — layer your own overlay on top. If MinIO is enabled, your overlay **must** also set `minio.ingress.hostname` to the real S3 API host (the chart derives `S3_ENDPOINT_URL` from it and fails closed otherwise — see [Generated S3 credentials](#generated-s3-credentials)):
 
 ```bash
 helm install mydb oci://gitea.local.togglecorp.com/tc-infra/tcpg --version 0.0.1 \
@@ -283,15 +283,56 @@ S3-compatible object store from the upstream Bitnami chart, pulled via OCI. Stan
 ```yaml
 minio:
   enabled: true
-  # Any key under `minio:` is passed through to the upstream chart.
+  ingress:
+    enabled: true
+    hostname: s3.example.com   # REQUIRED — the chart derives S3_ENDPOINT_URL from this
+  # Any other key under `minio:` is passed through to the upstream chart.
   # Full upstream values: https://github.com/bitnami/charts/blob/main/bitnami/minio/values.yaml
-  auth:
-    rootUser: "admin"
-    rootPassword: "your-minio-root-password"   # or set existingSecret
-  defaultBuckets: "my-bucket"                  # comma/space-separated, standalone-only
+defaultBuckets: "my-bucket"    # comma/space-separated, standalone-only
 ```
 
 S3 API DNS: `<release>-minio.<namespace>.svc.cluster.local:9000`. Console (UI) listens on `:9001` on the same Service.
+
+#### Generated S3 credentials
+
+The parent chart owns MinIO's credentials. When `minio.enabled: true` it renders a single Kubernetes Secret named **`minio-s3-credential`** (the value of `minio.auth.existingSecret`) with four keys:
+
+| Key | Description |
+| --- | --- |
+| `S3_ENDPOINT_URL` | S3 API URL — derived as `<endpointScheme>://<minio.ingress.hostname>`, or set verbatim via `minioConfig.endpointUrl`. |
+| `S3_REGION` | S3 region (`minioConfig.region`, default `us-east-1`). |
+| `S3_ACCESS_KEY_ID` | Access key id (`minioConfig.accessKeyId`, default `minio`). Not secret, not random. |
+| `S3_SECRET_ACCESS_KEY` | Secret key. Auto-generated (`randAlphaNum 32`) on first install and preserved across upgrades; set `minioConfig.secretAccessKey` to pin/rotate. |
+
+Wire it into your app with `envFrom` — the app gets all four keys as environment variables:
+
+```yaml
+envFrom:
+  - secretRef:
+      name: minio-s3-credential
+```
+
+This is the **single source of truth**: MinIO reads `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` back from the same Secret as its root user / password (via `minio.auth.existingSecret` + `rootUserSecretKey` / `rootPasswordSecretKey`). No duplicated keys, no drift.
+
+**`minio.ingress.hostname` is REQUIRED.** Unless you set `minioConfig.endpointUrl` explicitly, rendering **fails closed** if `minio.ingress` is disabled, the hostname is empty, or it's left at the upstream `minio.local` placeholder. For an in-cluster (non-ingress) endpoint, set `minioConfig.endpointUrl` instead, e.g.:
+
+```yaml
+minioConfig:
+  endpointUrl: "http://minio.my-namespace.svc.cluster.local:9000"
+```
+
+`minioConfig` override reference:
+
+```yaml
+minioConfig:
+  accessKeyId: minio        # S3_ACCESS_KEY_ID and MinIO's root user
+  secretAccessKey: ""       # empty → random 32-char, preserved across upgrades
+  region: us-east-1         # S3_REGION
+  endpointScheme: https     # scheme used when deriving the endpoint from ingress.hostname
+  endpointUrl: ""           # explicit S3_ENDPOINT_URL; empty → derived from ingress.hostname
+```
+
+**Rotation caveat.** Changing `minioConfig.secretAccessKey` (or the access key id) rewrites the Secret but does **not** restart pods automatically — you must manually restart both the MinIO pod(s) and the app pods for the new credentials to take effect. Any previously-issued presigned URLs break once the key rotates.
 
 **Bitnami image-distribution caveat (Aug 2025).** Bitnami moved every public `bitnami/*` Docker repo to subscription-only (Bitnami Secure Images). The chart's pinned defaults reference those gated repos; a vanilla install would 401 on every image pull.
 
