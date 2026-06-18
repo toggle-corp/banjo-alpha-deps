@@ -236,6 +236,7 @@ kubectl -n <namespace> get secret <release>-tcpg-pg-credential \
 | tcpg       | DIY (this chart, `templates/tcpg/`)                     | `tcpg.enabled`       |
 | dragonfly  | `oci://ghcr.io/dragonflydb/dragonfly/helm`, pinned in `Chart.yaml` | `dragonfly.enabled` |
 | garage     | vendored under `charts/garage/` (upstream not yet published a Helm chart) | `garage.enabled`    |
+| minio      | `oci://registry-1.docker.io/bitnamicharts/minio`, pinned in `Chart.yaml` | `minio.enabled`     |
 
 Dependencies are pulled with `helm dep update chart` (tarballs land in `chart/charts/*.tgz` and are `.gitignore`d — `Chart.lock` pins the versions).
 
@@ -274,6 +275,29 @@ garage:
   # Any key under `garage:` is passed through to the vendored chart.
   # See chart/charts/garage/values.yaml (and upstream README) for the full surface.
 ```
+
+### Enabling MinIO
+
+S3-compatible object store from the upstream Bitnami chart, pulled via OCI. Standalone (single-node) topology only — `chart/values/alpha.yaml` pins `mode: standalone` and a single replica.
+
+```yaml
+minio:
+  enabled: true
+  # Any key under `minio:` is passed through to the upstream chart.
+  # Full upstream values: https://github.com/bitnami/charts/blob/main/bitnami/minio/values.yaml
+  auth:
+    rootUser: "admin"
+    rootPassword: "your-minio-root-password"   # or set existingSecret
+  defaultBuckets: "my-bucket"                  # comma/space-separated, standalone-only
+```
+
+S3 API DNS: `<release>-minio.<namespace>.svc.cluster.local:9000`. Console (UI) listens on `:9001` on the same Service.
+
+**Bitnami image-distribution caveat (Aug 2025).** Bitnami moved every public `bitnami/*` Docker repo to subscription-only (Bitnami Secure Images). The chart's pinned defaults reference those gated repos; a vanilla install would 401 on every image pull.
+
+`chart/values.yaml` works around this by overriding all four image repositories the chart can pull (`image`, `clientImage`, `console.image`, `defaultInitContainers.volumePermissions.image`) to their `bitnamilegacy/*` equivalents — a frozen free mirror of the pre-cutover images. Tags are inherited from the chart's own pinned defaults; the same tags exist on bitnamilegacy, so versions stay in lockstep with whatever Chart.yaml's pinned `version:` was published with.
+
+Trade-off: `bitnamilegacy/*` is frozen — no future security patches. Acceptable for alpha; **not** for production. For prod, either restore `image.repository: bitnami/<name>` (and the other three) and supply pull secrets for a Bitnami Secure Images subscription, or migrate off the Bitnami chart entirely (e.g. `minio/operator`).
 
 ## Caveats
 

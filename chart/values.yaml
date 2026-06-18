@@ -107,3 +107,37 @@ garage:
 # full surface: https://github.com/dragonflydb/dragonfly/blob/main/contrib/charts/dragonfly/values.yaml
 dragonfly:
   enabled: false
+
+# MinIO (S3-compatible object store). Pulled from the Bitnami OCI chart at
+# registry-1.docker.io/bitnamicharts/minio (version pinned in Chart.yaml).
+# Values pass through to the subchart — see the upstream values for the full
+# surface: https://github.com/bitnami/charts/blob/main/bitnami/minio/values.yaml
+#
+# NOTE: Bitnami restructured image distribution in Aug 2025 — the public
+# `bitnami/*` repos went subscription-gated (Bitnami Secure Images). The chart
+# still pins those repos as defaults, so a vanilla install will 401 on pull.
+#
+# We override every image the chart can pull to `bitnamilegacy/*` — a frozen
+# free mirror of the pre-cutover images. Tags are inherited from the chart's
+# own pinned defaults (the same tags exist on bitnamilegacy, so versions stay
+# in lockstep with whatever Chart.yaml's `version:` was published with).
+#
+# Trade-off: `bitnamilegacy/*` is frozen — no future security patches. Fine
+# for alpha. For production, set `image.repository: bitnami/<name>` (and the
+# other three) back to bitnami and supply pull secrets for a Bitnami Secure
+# Images subscription, or migrate off the Bitnami chart entirely.
+minio:
+  enabled: false
+  image:
+    repository: bitnamilegacy/minio
+  clientImage:
+    repository: bitnamilegacy/minio-client
+  console:
+    image:
+      repository: bitnamilegacy/minio-object-browser
+  defaultInitContainers:
+    volumePermissions:
+      # Off by default upstream; pinned here so flipping `enabled: true` in an
+      # overlay doesn't silently fall back to the gated bitnami/os-shell repo.
+      image:
+        repository: bitnamilegacy/os-shell

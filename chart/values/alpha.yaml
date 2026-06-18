@@ -93,6 +93,52 @@ garage:
             values:
               - "true"
 
+# MinIO standalone for alpha. Image-repository overrides to bitnamilegacy/*
+# live in the chart's top-level values.yaml — alpha just picks the topology.
+minio:
+  # Stable name → API DNS: `minio.<namespace>.svc.cluster.local:9000`.
+  fullnameOverride: "minio"
+  disableWebUI: true
+  mode: standalone
+  console:
+    enabled: false
+  ingress:
+    enabled: true
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+  auth:
+    # Overlay must set rootPassword (or existingSecret) — chart fails closed
+    # with `forcePassword: true` if neither is provided.
+    forcePassword: true
+  defaultBuckets: ""
+  provisioning:
+    enabled: true
+    resourcesPreset: "nano"
+    cleanupAfterFinished:
+      enabled: true
+  resources:
+    requests:
+      cpu: 0.1
+      memory: 512Mi
+    limits:
+      cpu: 2
+      memory: 1Gi
+  global:
+    defaultStorageClass: "local-path"
+  persistence:
+    enabled: true
+    storageClass: "local-path"
+    size: 1Gi  # NOTE: ignored by local-path
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: "node.kubernetes.io/disk-raid"
+            operator: NotIn
+            values:
+              - "true"
+
 dragonfly:
   # Stable name → Service DNS: `dragonfly.<namespace>.svc.cluster.local:6379`.
   fullnameOverride: "dragonfly"

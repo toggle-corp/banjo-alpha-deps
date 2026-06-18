@@ -1,0 +1,33 @@
+suite: minio subchart gate
+# Bitnami minio renders the workload from application.yaml — Deployment in
+# standalone mode (our default), StatefulSet in distributed mode.
+# Glob the whole subchart so referenced helpers/secrets resolve at render time.
+#
+# Note: there is no test for the `minio.enabled: false` path. That gate lives
+# in the parent Chart.yaml as `condition: minio.enabled` and is enforced by
+# Helm itself — when off, Helm prunes the subchart from the graph entirely so
+# helm-unittest can't even select its templates ("not exists or not selected").
+templates:
+  - charts/minio/templates/**.yaml
+tests:
+  - it: rendered as a Deployment in standalone mode when minio.enabled is true
+    set:
+      minio.enabled: true
+      minio.mode: standalone
+      minio.auth.rootPassword: "unit-test-pw"
+    asserts:
+      - hasDocuments: { count: 1 }
+        template: charts/minio/templates/application.yaml
+      - isKind: { of: Deployment }
+        template: charts/minio/templates/application.yaml
+
+  - it: rendered as a StatefulSet in distributed mode
+    set:
+      minio.enabled: true
+      minio.mode: distributed
+      minio.auth.rootPassword: "unit-test-pw"
+    asserts:
+      - hasDocuments: { count: 1 }
+        template: charts/minio/templates/application.yaml
+      - isKind: { of: StatefulSet }
+        template: charts/minio/templates/application.yaml
