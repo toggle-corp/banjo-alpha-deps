@@ -3,6 +3,8 @@ templates:
   - tcpg/postgres.yaml
   - tcpg/secrets.yaml
   - tcpg/configmap.yaml
+set:
+  tcpg.enabled: true
 release:
   name: my-release
 tests:

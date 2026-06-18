@@ -1,6 +1,8 @@
 suite: configmap
 templates:
   - tcpg/configmap.yaml
+set:
+  tcpg.enabled: true
 tests:
   - it: emits no ConfigMap when dumpPath is empty
     asserts:

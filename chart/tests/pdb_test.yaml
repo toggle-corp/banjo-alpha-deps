@@ -1,6 +1,8 @@
 suite: pdb
 templates:
   - tcpg/pdb.yaml
+set:
+  tcpg.enabled: true
 tests:
   - it: emits no PDB by default
     asserts:

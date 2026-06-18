@@ -1,6 +1,8 @@
 suite: pvc
 templates:
   - tcpg/pvc.yaml
+set:
+  tcpg.enabled: true
 tests:
   - it: defaults to ReadWriteOnce with the configured size
     asserts:

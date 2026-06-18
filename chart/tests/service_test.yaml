@@ -1,6 +1,8 @@
 suite: service
 templates:
   - tcpg/service.yaml
+set:
+  tcpg.enabled: true
 tests:
   - it: renders ClusterIP service on port 5432 by default
     asserts:
