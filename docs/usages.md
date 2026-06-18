@@ -330,7 +330,35 @@ minioConfig:
   region: us-east-1         # S3_REGION
   endpointScheme: https     # scheme used when deriving the endpoint from ingress.hostname
   endpointUrl: ""           # explicit S3_ENDPOINT_URL; empty → derived from ingress.hostname
+  maxRequestBodyBytes: ""   # per-request body cap in bytes; empty → no Middleware rendered
+  memRequestBodyBytes: ""   # bytes buffered in memory before spilling to disk; empty → Traefik default (1 MiB)
 ```
+
+#### Limiting request body size (Traefik only)
+
+The parent chart can cap the size of each request hitting the MinIO S3 ingress via a [Traefik Middleware](https://doc.traefik.io/traefik/middlewares/http/buffering/). Set `minioConfig.maxRequestBodyBytes` (integer bytes) to opt in; when non-empty and `minio.enabled: true`, the chart renders a `Middleware` named **`minio-body-limit`** in the release namespace:
+
+```yaml
+minioConfig:
+  maxRequestBodyBytes: 104857600  # 100 MiB
+  memRequestBodyBytes: 52428800   # 50 MiB (optional; omit → Traefik's 1 MiB default)
+```
+
+- `maxRequestBodyBytes` is a **per-request** cap, **not** a per-object limit — a multipart upload is many requests, so the total object can far exceed this value. It bounds how large any single HTTP request body may be.
+- `memRequestBodyBytes` is how much of an in-flight request body Traefik holds in memory before spilling to disk. Empty → omitted from the spec, so Traefik's 1 MiB default applies. Only takes effect when `maxRequestBodyBytes` is set.
+
+The Middleware is a Traefik CRD, so this **requires the Traefik ingress controller**. Wire it to the MinIO ingress by setting `minio.ingress.ingressClassName: "traefik"` and referencing the Middleware via the `router.middlewares` annotation (the MinIO subchart resolves `{{ .Release.Namespace }}` through `tpl` at render time):
+
+```yaml
+minio:
+  ingress:
+    enabled: true
+    ingressClassName: "traefik"
+    annotations:
+      traefik.ingress.kubernetes.io/router.middlewares: '{{ .Release.Namespace }}-minio-body-limit@kubernetescrd'
+```
+
+The alpha overlay (`chart/values/alpha.yaml`) already wires all of this with a 100 MiB / 50 MiB pair.
 
 **Rotation caveat.** Changing `minioConfig.secretAccessKey` (or the access key id) rewrites the Secret but does **not** restart pods automatically — you must manually restart both the MinIO pod(s) and the app pods for the new credentials to take effect. Any previously-issued presigned URLs break once the key rotates.
 

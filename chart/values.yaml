@@ -167,3 +167,12 @@ minioConfig:
   # "<endpointScheme>://<minio.ingress.hostname>". Set this for in-cluster svc
   # endpoints or non-ingress setups.
   endpointUrl: ""
+  # Per-request body size cap (integer bytes) for the MinIO S3 ingress. Empty →
+  # no Traefik Middleware is rendered. This is a PER-REQUEST cap, not a
+  # per-object limit. Requires a Traefik ingress (the Middleware is a Traefik
+  # CRD; wire it via the router.middlewares annotation on minio.ingress).
+  maxRequestBodyBytes: ""
+  # Bytes held in memory per in-flight request before spilling to disk (integer
+  # bytes). Empty → omitted from the Middleware spec, so Traefik's 1 MiB default
+  # applies. Only takes effect when maxRequestBodyBytes is set.
+  memRequestBodyBytes: ""

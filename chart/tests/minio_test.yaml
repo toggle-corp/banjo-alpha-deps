@@ -31,3 +31,25 @@ tests:
         template: charts/minio/templates/application.yaml
       - isKind: { of: StatefulSet }
         template: charts/minio/templates/application.yaml
+
+  - it: resolves the Traefik router.middlewares annotation namespace and sets ingressClassName
+    # The subchart runs ingress annotation VALUES through common.tplvalues.render
+    # (tpl), so a literal `{{ .Release.Namespace }}` in the annotation resolves at
+    # render time. Default helm-unittest namespace is NAMESPACE.
+    set:
+      minio.enabled: true
+      minio.auth.rootPassword: "unit-test-pw"
+      minio.ingress.enabled: true
+      minio.ingress.hostname: s3.example.com
+      minio.ingress.ingressClassName: traefik
+      minio.ingress.annotations:
+        traefik.ingress.kubernetes.io/router.middlewares: '{{ .Release.Namespace }}-minio-body-limit@kubernetescrd'
+    asserts:
+      - equal:
+          path: metadata.annotations["traefik.ingress.kubernetes.io/router.middlewares"]
+          value: NAMESPACE-minio-body-limit@kubernetescrd
+        template: charts/minio/templates/ingress.yaml
+      - equal:
+          path: spec.ingressClassName
+          value: traefik
+        template: charts/minio/templates/ingress.yaml

@@ -1,0 +1,51 @@
+suite: minio body-limit middleware
+# Traefik Middleware that caps per-request body size for the MinIO S3 ingress.
+# Rendered only when minio.enabled and minioConfig.maxRequestBodyBytes is set.
+templates:
+  - templates/minio/middleware.yaml
+tests:
+  - it: renders a Traefik Middleware named minio-body-limit when enabled and cap set
+    set:
+      minio.enabled: true
+      minioConfig.maxRequestBodyBytes: 104857600
+    asserts:
+      - hasDocuments: { count: 1 }
+      - isAPIVersion: { of: traefik.io/v1alpha1 }
+      - isKind: { of: Middleware }
+      - equal:
+          path: metadata.name
+          value: minio-body-limit
+
+  - it: sets spec.buffering.maxRequestBodyBytes to the configured value
+    set:
+      minio.enabled: true
+      minioConfig.maxRequestBodyBytes: 104857600
+    asserts:
+      - equal:
+          path: spec.buffering.maxRequestBodyBytes
+          value: 104857600
+
+  - it: sets spec.buffering.memRequestBodyBytes when configured
+    set:
+      minio.enabled: true
+      minioConfig.maxRequestBodyBytes: 104857600
+      minioConfig.memRequestBodyBytes: 52428800
+    asserts:
+      - equal:
+          path: spec.buffering.memRequestBodyBytes
+          value: 52428800
+
+  - it: omits memRequestBodyBytes from the spec when unset
+    set:
+      minio.enabled: true
+      minioConfig.maxRequestBodyBytes: 104857600
+    asserts:
+      - notExists:
+          path: spec.buffering.memRequestBodyBytes
+
+  - it: is not rendered when maxRequestBodyBytes is empty
+    set:
+      minio.enabled: true
+      minioConfig.maxRequestBodyBytes: ""
+    asserts:
+      - hasDocuments: { count: 0 }

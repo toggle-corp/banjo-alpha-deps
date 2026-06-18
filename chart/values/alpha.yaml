@@ -63,6 +63,10 @@ garage:
     s3:
       api:
         enabled: true
+        # TODO(traefik): Garage stays on nginx for now. Its vendored chart
+        # renders ingress annotations with toYaml (not tpl) and must not be
+        # hand-edited, so the Traefik middleware-reference namespace can't be
+        # resolved cleanly. Resolve before migrating Garage to Traefik.
         className: "nginx"
   deployment:
     replicaCount: 1
@@ -109,8 +113,14 @@ minio:
     enabled: false
   ingress:
     enabled: true
+    ingressClassName: "traefik"
     annotations:
-      nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+      # Per-request body cap (NOT a per-object limit), enforced by the Traefik
+      # Middleware `minio-body-limit` (rendered by the parent chart from
+      # minioConfig.maxRequestBodyBytes). Requires a Traefik ingress. The
+      # `{{ .Release.Namespace }}` token below is left LITERAL on purpose — the
+      # MinIO subchart resolves it via tpl at render time.
+      traefik.ingress.kubernetes.io/router.middlewares: '{{ .Release.Namespace }}-minio-body-limit@kubernetescrd'
   defaultBuckets: ""
   provisioning:
     enabled: true
@@ -139,6 +149,14 @@ minio:
             operator: NotIn
             values:
               - "true"
+
+# Parent-chart-managed MinIO/S3 settings. Here we opt into the Traefik
+# body-limit Middleware (rendered by the parent chart, wired via the
+# router.middlewares annotation above). The caps are PER-REQUEST, not
+# per-object, and require the Traefik ingress controller.
+minioConfig:
+  maxRequestBodyBytes: 104857600  # 100 MiB — per-request cap
+  memRequestBodyBytes: 52428800   # 50 MiB — held in memory before spilling to disk
 
 dragonfly:
   # Stable name → Service DNS: `dragonfly.<namespace>.svc.cluster.local:6379`.

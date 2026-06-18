@@ -1,0 +1,13 @@
+{{- if and .Values.minio.enabled .Values.minioConfig.maxRequestBodyBytes }}
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: minio-body-limit
+  labels: {{- include "minio.s3.labels" . | nindent 4 }}
+spec:
+  buffering:
+    maxRequestBodyBytes: {{ .Values.minioConfig.maxRequestBodyBytes | int64 }}
+    {{- if .Values.minioConfig.memRequestBodyBytes }}
+    memRequestBodyBytes: {{ .Values.minioConfig.memRequestBodyBytes | int64 }}
+    {{- end }}
+{{- end }}
