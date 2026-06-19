@@ -4,7 +4,7 @@ description: "Umbrella chart for alpha-environment dependencies (tcpg, garage, d
 type: application
 version: 0.0.1  # managed by release.sh
 sources:
-  - https://gitea.local.togglecorp.com/tc-infra/tcpg
+  - https://gitea.local.togglecorp.com/togglecorp/banjo-alpha-deps
 dependencies:
   - name: dragonfly
     version: v1.38.0
