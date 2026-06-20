@@ -4,11 +4,12 @@ templates:
 set:
   tcpg.enabled: true
 tests:
-  - it: defaults to ReadWriteOnce with the configured size
+  - it: defaults to ReadWriteOnce with the configured size and local-path storageClass
     asserts:
       - isKind: { of: PersistentVolumeClaim }
       - equal: { path: 'spec.accessModes[0]', value: ReadWriteOnce }
-      - equal: { path: spec.resources.requests.storage, value: 10Gi }
+      - equal: { path: spec.resources.requests.storage, value: 1Gi }
+      - equal: { path: spec.storageClassName, value: local-path }
 
   - it: emits no PVC when persistence is disabled
     set:

@@ -12,28 +12,84 @@ Create a `values.yaml` and install:
 helm install mydb oci://gitea.local.togglecorp.com/tc-infra/tcpg --version 0.0.1 -f values.yaml
 ```
 
-Apps connect via the ClusterIP service: `mydb-tcpg.<namespace>.svc.cluster.local:5432`.
+Apps connect via the ClusterIP service: `tcpg.<namespace>.svc.cluster.local:5432` (fixed name — see [Connecting](#connecting)).
+
+## Minimum values to define
+
+The chart's `values.yaml` defaults are already tuned for tc alpha (modest resource requests, `local-path` storage, RAID-avoiding nodeAffinity, fixed resource names, a 100 MiB MinIO body cap). You only supply the per-install values below. Every component is **opt-in** (`enabled: false` by default).
+
+Copy this block into your overlay, fill the `# REQUIRED` lines, and delete the components you don't need:
+
+```yaml
+# === Postgres (tcpg) =========================================================
+tcpg:
+  enabled: true                 # REQUIRED to deploy Postgres at all
+  init:
+    # REQUIRED under GitOps (ArgoCD/Flux): write-once / init-frozen — baked into
+    # the PVC at first init and never re-read. An empty value regenerates a new
+    # random password on every sync and breaks auth. Plain `helm upgrade` may
+    # leave this empty (a random 32-char password is generated once and kept).
+    # Consumed by: the app, via the `tcpg-pg-credential` Secret (POSTGRES_PASSWORD).
+    password: "CHANGE-ME-db-password"   # REQUIRED (GitOps) / optional (plain Helm)
+
+    # optional — one-shot restore on FIRST init only. Effective URL = dumpBaseUrl + dumpPath.
+    dumpBaseUrl: ""             # optional, e.g. https://dumps.example.internal:8080
+    dumpPath: ""               # optional, e.g. /path/to/init-db.dump (empty → no restore)
+    dumpAuth:
+      type: none               # optional: none | basic | bearer
+      value: ""                # optional: "user:pass" (basic) or token (bearer)
+    dumpInsecureSkipTlsVerify: false   # optional: set true for internal self-signed dump hosts
+
+# === MinIO (S3-compatible object store) ======================================
+minio:
+  enabled: true                 # REQUIRED to deploy MinIO at all
+  ingress:
+    hostname: "s3.example.com"  # REQUIRED when minio on — chart derives S3_ENDPOINT_URL from it.
+                                # (Alternatively set minioConfig.endpointUrl for an in-cluster endpoint.)
+  defaultBuckets: ""           # optional, comma/space-separated, e.g. "uploads,backups"
+minioConfig:
+  # REQUIRED under GitOps: rotatable (MinIO re-reads it on restart). An empty
+  # value regenerates on every sync and breaks both MinIO and consumers. Plain
+  # Helm may leave this empty (random 32-char, preserved). Do NOT use ArgoCD
+  # ignoreDifferences here — it would block rotation.
+  # Consumed by: MinIO (root password) AND the app, via `minio-s3-credential` (S3_SECRET_ACCESS_KEY).
+  secretAccessKey: ""          # REQUIRED (GitOps) / optional (plain Helm)
+  endpointUrl: ""             # optional — set instead of minio.ingress.hostname for in-cluster endpoints
+
+# === Garage / Dragonfly (optional extra components) ==========================
+garage:
+  enabled: false               # flip to true to deploy Garage (single-node S3)
+dragonfly:
+  enabled: false               # flip to true to deploy Dragonfly (Redis-compatible)
+```
+
+**Consumer secrets to `envFrom`** (fixed names due to `fullnameOverride`, no `<release>-` prefix):
+
+- `tcpg-pg-credential` — Postgres connection (`POSTGRES_HOST/PORT/DB/USER/PASSWORD/URI`).
+- `minio-s3-credential` — S3 access (`S3_ENDPOINT_URL/REGION/ACCESS_KEY_ID/SECRET_ACCESS_KEY`).
 
 ## Alpha environment (tc cluster)
 
-The chart ships a ready-to-use base for alpha deploys at `chart/values/alpha.yaml`: modest resource requests, `local-path` storage, a nodeAffinity rule that avoids RAID nodes, and `dumpInsecureSkipTlsVerify: true` for internal dump hosts. It does **not** set credentials or a dump URL — layer your own overlay on top. If MinIO is enabled, your overlay **must** also set `minio.ingress.hostname` to the real S3 API host (the chart derives `S3_ENDPOINT_URL` from it and fails closed otherwise — see [Generated S3 credentials](#generated-s3-credentials)):
+This chart is alpha / tc-cluster-only, and its `values.yaml` defaults are already tuned for it: modest resource requests, `local-path` storage, a nodeAffinity rule that avoids RAID nodes, fixed resource names, and a 100 MiB/50 MiB MinIO request-body cap. There is **no separate overlay to layer** — just supply your per-install values (credentials, dump source, MinIO hostname) directly:
 
 ```bash
 helm install mydb oci://gitea.local.togglecorp.com/tc-infra/tcpg --version 0.0.1 \
-  -f chart/values/alpha.yaml \
   -f my-overlay.yaml
 ```
 
-Where `my-overlay.yaml` provides per-install specifics (password, dump source, etc.):
+Where `my-overlay.yaml` provides per-install specifics (password, dump source, etc.). Note `dumpInsecureSkipTlsVerify` stays `false` in the defaults — set it per-install when your dump host uses an internal/self-signed cert:
 
 ```yaml
-init:
-  password: "your-db-password-here"
-  dumpBaseUrl: "https://dumps.example.internal:8080"
-  dumpPath: "/path/to/init-db.dump"
-  dumpAuth:
-    type: basic
-    value: "dump-user:dump-password-here"
+tcpg:
+  enabled: true
+  init:
+    password: "your-db-password-here"
+    dumpBaseUrl: "https://dumps.example.internal:8080"
+    dumpPath: "/path/to/init-db.dump"
+    dumpInsecureSkipTlsVerify: true   # per-install: internal self-signed dump host
+    dumpAuth:
+      type: basic
+      value: "dump-user:dump-password-here"
 ```
 
 ## Example: full setup with dump restore
@@ -94,19 +150,19 @@ This block is **first-init only**: the credentials seed the DB the first time it
 
 - `init.database` (default `postgres`) — DB created by the entrypoint.
 - `init.username` (default `postgres`) — superuser created by the entrypoint.
-- `init.password` — if empty, a random 32-char password is generated on first install. It's preserved across upgrades via a `lookup` on the existing `<release>-tcpg-pg-credential` Secret, so setting it empty is safe for rotation-free operation under plain `helm upgrade`. **Under GitOps (ArgoCD/Flux) this is unsafe:** `lookup` returns nothing under `helm template`, so an empty password regenerates a new random value on every sync, which then drifts from the password already baked into the existing PVC and breaks authentication. Under GitOps, either set `init.password` explicitly or configure the Application to ignore the Secret's data — see [Running under ArgoCD / GitOps](#running-under-argocd--gitops).
+- `init.password` — if empty, a random 32-char password is generated on first install. It's preserved across upgrades via a `lookup` on the existing `tcpg-pg-credential` Secret, so setting it empty is safe for rotation-free operation under plain `helm upgrade`. **Under GitOps (ArgoCD/Flux) this is unsafe:** `lookup` returns nothing under `helm template`, so an empty password regenerates a new random value on every sync, which then drifts from the password already baked into the existing PVC and breaks authentication. Under GitOps, either set `init.password` explicitly or configure the Application to ignore the Secret's data — see [Running under ArgoCD / GitOps](#running-under-argocd--gitops).
 - `init.dumpBaseUrl` + `init.dumpPath` — optional. Concatenated verbatim into the dump URL. Empty `dumpPath` disables restore; if `dumpPath` is set, `dumpBaseUrl` is required. Both are non-secret (plain env vars in the pod spec) — do **not** embed credentials in the URL.
 - `init.dumpAuth.type` ∈ `none | basic | bearer`:
   - `none` — no auth header.
   - `basic` — `value` is `user:pass`, passed as `curl -u`.
   - `bearer` — `value` is the token, sent as `Authorization: Bearer <value>`.
-- `init.dumpAuth.value` — the only secret. Stored in a dedicated chart-managed Secret named `<release>-tcpg-load-credential` (separate from the main `<release>-tcpg-pg-credential` that Postgres reads — prevents the dump auth from leaking into the Postgres container env).
+- `init.dumpAuth.value` — the only secret. Stored in a dedicated chart-managed Secret named `tcpg-load-credential` (separate from the main `tcpg-pg-credential` that Postgres reads — prevents the dump auth from leaking into the Postgres container env).
 - `init.existingDumpAuthSecret.{name,key}` — alternative: reference a pre-existing Secret instead of setting `dumpAuth.value` inline. Mutually exclusive with inline; template validation fails hard if both are set.
 - `init.dumpInsecureSkipTlsVerify` (default `false`) — `curl -k` for the download. Use only for internal / self-signed hosts.
 
 #### Password persistence: plain Helm vs GitOps
 
-The generated DB password lives only in the `<release>-tcpg-pg-credential` Secret and is reused on subsequent renders via a Helm `lookup`. How that behaves depends on how you render the chart:
+The generated DB password lives only in the `tcpg-pg-credential` Secret and is reused on subsequent renders via a Helm `lookup`. How that behaves depends on how you render the chart:
 
 - **Plain `helm install` / `helm upgrade` (against a live cluster): nothing to do.** `lookup` reads the existing Secret, so an empty `init.password` is generated once on first install and preserved on every upgrade. This is the default happy path.
 - **ArgoCD / Flux (`helm template`, no cluster read): `lookup` is blind** and always returns empty. So if `init.password` is empty, a brand-new random password is generated on **every sync** and overwrites the Secret — which then no longer matches the password baked into the existing PVC, and Postgres auth fails.
@@ -123,7 +179,7 @@ spec:
   ignoreDifferences:
     - group: ""
       kind: Secret
-      name: <release>-tcpg-pg-credential
+      name: tcpg-pg-credential
       jsonPointers:
         - /data
   syncPolicy:
@@ -170,8 +226,8 @@ Inline (`dumpAuth.value`) and external (`existingDumpAuthSecret.name`) are mutua
 ### `persistence` — PVC
 
 - `persistence.enabled` (default `true`) — when `false`, uses an `emptyDir` (data lost on pod restart). Only useful for ephemeral testing.
-- `persistence.storageClass` — use "local-path" for tc cluster.
-- `persistence.size` (default `10Gi`).
+- `persistence.storageClass` (default `local-path`) — the tc-cluster node-local provisioner; it ignores `size` (node disk is the real limit).
+- `persistence.size` (default `1Gi`; ignored by `local-path`).
 - `persistence.accessModes` (default `[ReadWriteOnce]`).
 
 ### `service`
@@ -180,11 +236,11 @@ Inline (`dumpAuth.value`) and external (`existingDumpAuthSecret.name`) are mutua
 
 ### `resources`
 
-Standard Kubernetes resource requests/limits. Empty by default (`{}`). Set both requests and limits in production — the chart doesn't impose defaults.
+Standard Kubernetes resource requests/limits. Defaults to `requests: {cpu: 0.1, memory: 1Gi}` / `limits: {cpu: 2, memory: 1Gi}` (memory request == limit keeps Postgres in the Guaranteed QoS class; CPU is burstable for dump restore / ad-hoc queries). Override for larger workloads.
 
 ### Scheduling: `affinity`, `tolerations`, `nodeSelector`
 
-Plain passthrough to pod spec. All default to empty.
+Plain passthrough to pod spec. `tolerations` and `nodeSelector` default to empty. `affinity` defaults to a RAID-avoiding `nodeAffinity` (keeps disposable alpha databases off the RAID node pool, which is reserved for prod) — override or clear it if you need different scheduling.
 
 ```yaml
 nodeSelector:
@@ -234,11 +290,11 @@ Override only if you know why.
 
 ## Connecting
 
-The chart renders a consumer-facing Secret `<release>-tcpg-pg-credential` with everything an app needs. Keys:
+The chart renders a consumer-facing Secret `tcpg-pg-credential` with everything an app needs. Keys:
 
 | Key                 | Value                                                           |
 |---------------------|-----------------------------------------------------------------|
-| `POSTGRES_HOST`     | `<release>-tcpg.<namespace>.svc.cluster.local`                  |
+| `POSTGRES_HOST`     | `tcpg.<namespace>.svc.cluster.local`                  |
 | `POSTGRES_PORT`     | `5432` (or `service.port` override)                             |
 | `POSTGRES_DB`       | `init.database`                                                 |
 | `POSTGRES_USER`     | `init.username`                                                 |
@@ -250,13 +306,13 @@ App pods can bind the whole thing via `envFrom`:
 ```yaml
 envFrom:
   - secretRef:
-      name: <release>-tcpg-pg-credential
+      name: tcpg-pg-credential
 ```
 
 Fetch the generated password manually:
 
 ```bash
-kubectl -n <namespace> get secret <release>-tcpg-pg-credential \
+kubectl -n <namespace> get secret tcpg-pg-credential \
   -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d
 ```
 
@@ -286,7 +342,7 @@ dragonfly:
     limits:   { cpu: "1",    memory: "512Mi" }
 ```
 
-Dragonfly Service DNS: `<release>-dragonfly.<namespace>.svc.cluster.local:6379`.
+Dragonfly Service DNS: `dragonfly.<namespace>.svc.cluster.local:6379`.
 
 ### Enabling Garage
 
@@ -311,7 +367,7 @@ garage:
 
 ### Enabling MinIO
 
-S3-compatible object store from the upstream Bitnami chart, pulled via OCI. Standalone (single-node) topology only — `chart/values/alpha.yaml` pins `mode: standalone` and a single replica.
+S3-compatible object store from the upstream Bitnami chart, pulled via OCI. Standalone (single-node) topology only — the baked-in `chart/values.yaml` defaults pin `mode: standalone` and a single replica.
 
 ```yaml
 minio:
@@ -324,7 +380,7 @@ minio:
 defaultBuckets: "my-bucket"    # comma/space-separated, standalone-only
 ```
 
-S3 API DNS: `<release>-minio.<namespace>.svc.cluster.local:9000`. Console (UI) listens on `:9001` on the same Service.
+S3 API DNS: `minio.<namespace>.svc.cluster.local:9000`. Console (UI) listens on `:9001` on the same Service.
 
 #### Generated S3 credentials
 
@@ -374,8 +430,8 @@ minioConfig:
   region: us-east-1         # S3_REGION
   endpointScheme: https     # scheme used when deriving the endpoint from ingress.hostname
   endpointUrl: ""           # explicit S3_ENDPOINT_URL; empty → derived from ingress.hostname
-  maxRequestBodyBytes: ""   # per-request body cap in bytes; empty → no Middleware rendered
-  memRequestBodyBytes: ""   # bytes buffered in memory before spilling to disk; empty → Traefik default (1 MiB)
+  maxRequestBodyBytes: 104857600  # default 100 MiB; per-request body cap in bytes; "" → no Middleware rendered
+  memRequestBodyBytes: 52428800   # default 50 MiB; bytes buffered in memory before spilling to disk; "" → Traefik default (1 MiB)
 ```
 
 #### Limiting request body size (Traefik only)
@@ -402,7 +458,7 @@ minio:
       traefik.ingress.kubernetes.io/router.middlewares: '{{ .Release.Namespace }}-minio-body-limit@kubernetescrd'
 ```
 
-The alpha overlay (`chart/values/alpha.yaml`) already wires all of this with a 100 MiB / 50 MiB pair.
+The baked-in `chart/values.yaml` defaults already wire all of this with a 100 MiB / 50 MiB pair, so the body cap is on by default whenever `minio.enabled: true`. Set `minioConfig.maxRequestBodyBytes: ""` to disable it.
 
 **Rotation caveat.** Changing `minioConfig.secretAccessKey` (or the access key id) rewrites the Secret but does **not** restart pods automatically — you must manually restart both the MinIO pod(s) and the app pods for the new credentials to take effect. Any previously-issued presigned URLs break once the key rotates.
 

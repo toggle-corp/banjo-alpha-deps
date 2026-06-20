@@ -1,7 +1,9 @@
 {{/*
-tcpg helpers. Resource names are kept at `<release>-tcpg-*` regardless of the
-umbrella chart name (`banjo-alpha-deps`), so "tcpg" is hardcoded below — the
-name helpers do not read `.Chart.Name`.
+tcpg helpers. "tcpg" is hardcoded below — the name helpers do not read
+`.Chart.Name`. By default `values.yaml` sets `tcpg.fullnameOverride: "tcpg"`,
+so resources render with the fixed name `tcpg-*` (not `<release>-tcpg-*`),
+giving a stable Service DNS (`tcpg.<namespace>.svc.cluster.local`). Clear the
+override to fall back to the `<release>-tcpg-*` naming computed below.
 */}}
 
 {{- define "tcpg.name" -}}

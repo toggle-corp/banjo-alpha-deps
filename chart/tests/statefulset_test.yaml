@@ -13,7 +13,7 @@ tests:
     asserts:
       - isKind: { of: StatefulSet }
       - equal: { path: spec.replicas, value: 1 }
-      - equal: { path: spec.serviceName, value: my-release-tcpg }
+      - equal: { path: spec.serviceName, value: tcpg }
 
   - it: has hardened pod securityContext
     template: tcpg/postgres.yaml
@@ -82,7 +82,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].envFrom[0].secretRef.name
-          value: my-release-tcpg-pg-credential
+          value: tcpg-pg-credential
 
   - it: main container envFrom does not reference the load-credential secret (no DUMP_AUTH_VALUE leak)
     template: tcpg/postgres.yaml
@@ -97,7 +97,7 @@ tests:
           any: true
           content:
             secretRef:
-              name: my-release-tcpg-load-credential
+              name: tcpg-load-credential
       - notContains:
           path: spec.template.spec.containers[0].env
           any: true
@@ -191,7 +191,7 @@ tests:
             name: DUMP_AUTH_VALUE
             valueFrom:
               secretKeyRef:
-                name: my-release-tcpg-load-credential
+                name: tcpg-load-credential
                 key: DUMP_AUTH_VALUE
 
   - it: wires DUMP_AUTH_VALUE from externally-managed secret when configured
@@ -353,10 +353,18 @@ tests:
       - exists:
           path: 'spec.template.metadata.annotations["checksum/restore-script"]'
 
-  - it: omits affinity, tolerations, and nodeSelector by default
+  - it: renders the RAID nodeAffinity by default and omits tolerations and nodeSelector
     template: tcpg/postgres.yaml
     asserts:
-      - notExists: { path: spec.template.spec.affinity }
+      - equal:
+          path: spec.template.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].key
+          value: node.kubernetes.io/disk-raid
+      - equal:
+          path: spec.template.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].operator
+          value: NotIn
+      - equal:
+          path: spec.template.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].values
+          value: ["true"]
       - notExists: { path: spec.template.spec.tolerations }
       - notExists: { path: spec.template.spec.nodeSelector }
 
@@ -392,6 +400,13 @@ tests:
             operator: Equal
             value: db
             effect: NoSchedule
+
+  - it: populates container resources by default
+    template: tcpg/postgres.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.memory
+          value: 1Gi
 
   - it: renders nodeSelector when set
     template: tcpg/postgres.yaml

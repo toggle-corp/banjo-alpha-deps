@@ -1,7 +1,9 @@
 tcpg:
   enabled: false
 
-  # fullnameOverride: "my-postgres"
+  # Stable name → predictable Service DNS: `tcpg.<namespace>.svc.cluster.local`.
+  # Fixed name → resources are `tcpg-*` instead of `<release>-tcpg-*`.
+  fullnameOverride: "tcpg"
 
   image:
     repository: postgres
@@ -14,7 +16,15 @@ tcpg:
     tag: "8.11.1"
     pullPolicy: IfNotPresent
 
-  resources: {}
+  # Memory request == limit (1Gi) keeps Postgres in the Guaranteed QoS class.
+  # CPU burstable from 0.1 → 2 cores for dump restore / ad-hoc queries.
+  resources:
+    requests:
+      cpu: 0.1
+      memory: 1Gi
+    limits:
+      cpu: 2
+      memory: 1Gi
 
   # First-init only. These values seed the database the FIRST time it is
   # initialized: the credentials below seed the DB, and the dump/restore config
@@ -68,8 +78,9 @@ tcpg:
 
   persistence:
     enabled: true
-    storageClass: ""
-    size: 10Gi
+    # local-path uses the node's local disk via Rancher's local-path-provisioner.
+    storageClass: "local-path"
+    size: 1Gi  # NOTE: ignored by local-path (node disk is the real limit)
     accessModes:
       - ReadWriteOnce
 
@@ -97,7 +108,18 @@ tcpg:
   podDisruptionBudget:
     enabled: false
 
-  affinity: {}
+  # Steer alpha databases off RAID nodes — RAID is reserved for prod. Alpha
+  # workloads are disposable, so we leave the RAID pool for production-grade
+  # services.
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: "node.kubernetes.io/disk-raid"
+            operator: NotIn
+            values:
+              - "true"
 
   tolerations: []
 
@@ -113,8 +135,55 @@ tcpg:
 # git.deuxfleurs.fr/Deuxfleurs/garage (upstream has not yet published a
 # standalone chart). Refresh with ./scripts/vendor-garage.sh.
 # Full upstream values: see chart/charts/garage/values.yaml.
+#
+# Garage runs in single-node mode for alpha. Two knobs must agree:
+#   - deployment.replicaCount  → pod count
+#   - garage.replicationFactor → copies of data garage keeps per object
+# If replicationFactor > replicaCount, writes fail with "not enough nodes".
+# (The nested `garage.garage.*` key is not a typo — the outer `garage:` is the
+# subchart gate; the inner one maps to Garage's own garage.toml settings.)
 garage:
   enabled: false
+  # Stable name → resources are `garage-*` instead of `<release>-garage-*`.
+  fullnameOverride: "garage"
+  ingress:
+    s3:
+      api:
+        enabled: true
+        # TODO(traefik): Garage stays on nginx for now. Its vendored chart
+        # renders ingress annotations with toYaml (not tpl) and must not be
+        # hand-edited, so the Traefik middleware-reference namespace can't be
+        # resolved cleanly. Resolve before migrating Garage to Traefik.
+        className: "nginx"
+  deployment:
+    replicaCount: 1
+  garage:
+    replicationFactor: "1"
+  resources:
+    requests:
+      cpu: 0.1
+      memory: 512Mi
+    limits:
+      cpu: 2
+      memory: 1Gi
+  persistence:
+    enabled: true
+    meta:
+      storageClass: "local-path"
+      size: 100Mi  # NOTE: ignored by local-path (node disk is the real limit)
+    data:
+      storageClass: "local-path"
+      size: 100Mi  # NOTE: ignored by local-path (node disk is the real limit)
+  affinity:
+    nodeAffinity:
+      # Keep alpha workloads off RAID nodes — RAID is reserved for prod.
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: "node.kubernetes.io/disk-raid"
+            operator: NotIn
+            values:
+              - "true"
 
 # Dragonfly (Redis-compatible in-memory store). Pulled from the official OCI
 # chart at ghcr.io/dragonflydb/dragonfly/helm (version pinned in Chart.yaml).
@@ -122,6 +191,31 @@ garage:
 # full surface: https://github.com/dragonflydb/dragonfly/blob/main/contrib/charts/dragonfly/values.yaml
 dragonfly:
   enabled: false
+  # Stable name → Service DNS: `dragonfly.<namespace>.svc.cluster.local:6379`.
+  fullnameOverride: "dragonfly"
+  # Single-replica for alpha (no HA, no snapshot replication). Dragonfly has no
+  # separate replicationFactor — `replicaCount: 1` is the only knob needed.
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 0.1
+      memory: 1Gi
+    limits:
+      cpu: 2
+      memory: 1Gi
+  storage:
+    enabled: true
+    storageClassName: "local-path"
+    requests: 128Mi  # NOTE: ignored by local-path (node disk is the real limit)
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: "node.kubernetes.io/disk-raid"
+            operator: NotIn
+            values:
+              - "true"
 
 # MinIO (S3-compatible object store). Pulled from the Bitnami OCI chart at
 # registry-1.docker.io/bitnamicharts/minio (version pinned in Chart.yaml).
@@ -141,8 +235,15 @@ dragonfly:
 # for alpha. For production, set `image.repository: bitnami/<name>` (and the
 # other three) back to bitnami and supply pull secrets for a Bitnami Secure
 # Images subscription, or migrate off the Bitnami chart entirely.
+#
+# MinIO standalone for alpha. The topology below (standalone mode, WebUI off,
+# Traefik ingress, single-node persistence) is baked in; a per-install overlay
+# only supplies `minio.ingress.hostname` (the real S3 API host) and
+# `minio.defaultBuckets`.
 minio:
   enabled: false
+  # Stable name → API DNS: `minio.<namespace>.svc.cluster.local:9000`.
+  fullnameOverride: "minio"
   auth:
     # The parent chart generates this secret (see templates/minio/secret.yaml) and
     # MinIO reads its root creds back from it. Single source of truth: the secret
@@ -155,6 +256,7 @@ minio:
   clientImage:
     repository: bitnamilegacy/minio-client
   console:
+    enabled: false
     image:
       repository: bitnamilegacy/minio-object-browser
   defaultInitContainers:
@@ -163,6 +265,50 @@ minio:
       # overlay doesn't silently fall back to the gated bitnami/os-shell repo.
       image:
         repository: bitnamilegacy/os-shell
+  disableWebUI: true
+  mode: standalone
+  ingress:
+    enabled: true
+    ingressClassName: "traefik"
+    annotations:
+      # Per-request body cap (NOT a per-object limit), enforced by the Traefik
+      # Middleware `minio-body-limit` (rendered by the parent chart from
+      # minioConfig.maxRequestBodyBytes). Requires a Traefik ingress. The
+      # `{{ .Release.Namespace }}` token below is left LITERAL on purpose — the
+      # MinIO subchart resolves it via tpl at render time.
+      traefik.ingress.kubernetes.io/router.middlewares: '{{ .Release.Namespace }}-minio-body-limit@kubernetescrd'
+  # Your per-install overlay MUST set `minio.ingress.hostname` to the real S3 API
+  # host. The parent chart derives S3_ENDPOINT_URL from it (see
+  # templates/minio/secret.yaml); rendering fails closed if it's left empty (or
+  # set minioConfig.endpointUrl explicitly).
+  defaultBuckets: ""
+  provisioning:
+    enabled: true
+    resourcesPreset: "nano"
+    cleanupAfterFinished:
+      enabled: true
+  resources:
+    requests:
+      cpu: 0.1
+      memory: 512Mi
+    limits:
+      cpu: 2
+      memory: 1Gi
+  global:
+    defaultStorageClass: "local-path"
+  persistence:
+    enabled: true
+    storageClass: "local-path"
+    size: 1Gi  # NOTE: ignored by local-path (node disk is the real limit)
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: "node.kubernetes.io/disk-raid"
+            operator: NotIn
+            values:
+              - "true"
 
 # Parent-chart-managed MinIO/S3 credentials. The chart renders a single Secret
 # (templates/minio/secret.yaml, named after minio.auth.existingSecret) exposing
@@ -186,8 +332,8 @@ minioConfig:
   # no Traefik Middleware is rendered. This is a PER-REQUEST cap, not a
   # per-object limit. Requires a Traefik ingress (the Middleware is a Traefik
   # CRD; wire it via the router.middlewares annotation on minio.ingress).
-  maxRequestBodyBytes: ""
+  maxRequestBodyBytes: 104857600  # 100 MiB — per-request cap
   # Bytes held in memory per in-flight request before spilling to disk (integer
   # bytes). Empty → omitted from the Middleware spec, so Traefik's 1 MiB default
   # applies. Only takes effect when maxRequestBodyBytes is set.
-  memRequestBodyBytes: ""
+  memRequestBodyBytes: 52428800   # 50 MiB — held in memory before spilling to disk

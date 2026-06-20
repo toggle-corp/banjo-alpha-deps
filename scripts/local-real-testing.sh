@@ -20,5 +20,4 @@ helm upgrade --install \
     tcpg-test \
     ./chart \
     -n $TEST_NAMESPACE \
-    --values chart/values/alpha.yaml \
     --values $TEST_VALUES

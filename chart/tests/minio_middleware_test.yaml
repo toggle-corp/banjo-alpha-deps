@@ -35,13 +35,27 @@ tests:
           path: spec.buffering.memRequestBodyBytes
           value: 52428800
 
-  - it: omits memRequestBodyBytes from the spec when unset
+  - it: omits memRequestBodyBytes from the spec when explicitly cleared
     set:
       minio.enabled: true
       minioConfig.maxRequestBodyBytes: 104857600
+      minioConfig.memRequestBodyBytes: ""
     asserts:
       - notExists:
           path: spec.buffering.memRequestBodyBytes
+
+  - it: renders by default when minio is enabled and no minioConfig override is given
+    set:
+      minio.enabled: true
+    asserts:
+      - hasDocuments: { count: 1 }
+      - isKind: { of: Middleware }
+      - equal:
+          path: metadata.name
+          value: minio-body-limit
+      - equal:
+          path: spec.buffering.maxRequestBodyBytes
+          value: 104857600
 
   - it: is not rendered when maxRequestBodyBytes is empty
     set:

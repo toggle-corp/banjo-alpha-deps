@@ -51,6 +51,7 @@ Helm chart: simple Postgres replacement for Bitnami chart.
         - auto create bucket
         - auto create secrets
             - Generate a secret from root chart and pass it to the garagahq chart
+- [x] Merge values/alpha.yaml -> values.yaml
 
 ## Review follow-ups (2026-04-22)
 
