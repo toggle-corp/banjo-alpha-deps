@@ -1,4 +1,4 @@
-{{- if and .Values.tcpg.enabled .Values.tcpg.auth.dumpPath }}
+{{- if and .Values.tcpg.enabled .Values.tcpg.init.dumpPath }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

@@ -13,8 +13,8 @@ release:
 tests:
   - it: omits annotations on every resource by default
     set:
-      tcpg.auth.dumpBaseUrl: https://example.com
-      tcpg.auth.dumpPath: /d.dump
+      tcpg.init.dumpBaseUrl: https://example.com
+      tcpg.init.dumpPath: /d.dump
       tcpg.podDisruptionBudget.enabled: true
     asserts:
       - notExists: { path: metadata.annotations, template: tcpg/postgres.yaml }
@@ -26,8 +26,8 @@ tests:
 
   - it: applies commonAnnotations to every resource's metadata
     set:
-      tcpg.auth.dumpBaseUrl: https://example.com
-      tcpg.auth.dumpPath: /d.dump
+      tcpg.init.dumpBaseUrl: https://example.com
+      tcpg.init.dumpPath: /d.dump
       tcpg.podDisruptionBudget.enabled: true
       tcpg.commonAnnotations:
         argocd.argoproj.io/sync-wave: "-1"

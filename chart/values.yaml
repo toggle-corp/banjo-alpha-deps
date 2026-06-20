@@ -16,10 +16,25 @@ tcpg:
 
   resources: {}
 
-  auth:
+  # First-init only. These values seed the database the FIRST time it is
+  # initialized: the credentials below seed the DB, and the dump/restore config
+  # runs only at first init. After that, the live DB state in the PVC is what
+  # matters — re-rendering this block does not re-seed an existing database.
+  init:
     database: postgres
     username: postgres
-    # If empty, a random password is generated on first install and preserved across upgrades.
+    # Seeds the password ONLY at first init. Afterwards the live password lives
+    # in the <release>-tcpg-pg-credential Secret and is reused via a `lookup` on
+    # that Secret, so the value here is ignored once the DB exists.
+    #
+    # WARNING (GitOps): `lookup` returns nothing under `helm template` (and thus
+    # ArgoCD/Flux), so leaving this empty under GitOps regenerates a NEW random
+    # password on every sync, which then drifts from the password baked into the
+    # existing PVC and breaks auth. Under GitOps you MUST either set this
+    # explicitly, OR configure the ArgoCD Application to ignore the Secret's data
+    # (see docs/usages.md). Outside GitOps (plain `helm upgrade`), an empty value
+    # is fine: a random password is generated on first install and preserved
+    # across upgrades via the lookup.
     password: ""
     # Optional one-shot restore on first init. Effective URL is dumpBaseUrl + dumpPath,
     # concatenated verbatim at runtime. Both are non-secret (plain env vars, visible

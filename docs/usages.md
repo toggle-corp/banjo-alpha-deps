@@ -27,7 +27,7 @@ helm install mydb oci://gitea.local.togglecorp.com/tc-infra/tcpg --version 0.0.1
 Where `my-overlay.yaml` provides per-install specifics (password, dump source, etc.):
 
 ```yaml
-auth:
+init:
   password: "your-db-password-here"
   dumpBaseUrl: "https://dumps.example.internal:8080"
   dumpPath: "/path/to/init-db.dump"
@@ -49,9 +49,11 @@ resources:
     cpu: 2
     memory: 1Gi
 
-auth:
+init:
   # Inline password (stored in the chart-managed Secret). Leave empty to
   # auto-generate a 32-char random password, preserved across upgrades via lookup.
+  # NOTE: under GitOps (ArgoCD/Flux) an empty password drifts — set it explicitly
+  # or ignore the Secret data (see "Running under ArgoCD / GitOps" below).
   password: "your-db-password-here"
 
   # One-shot restore on first init. Effective URL = dumpBaseUrl + dumpPath.
@@ -86,19 +88,45 @@ affinity:
 
 ## Option reference
 
-### `auth` — database credentials and restore
+### `init` — first-init database credentials and restore
 
-- `auth.database` (default `postgres`) — DB created by the entrypoint.
-- `auth.username` (default `postgres`) — superuser created by the entrypoint.
-- `auth.password` — if empty, a random 32-char password is generated on first install. It's preserved across upgrades via a `lookup` on the existing Secret, so setting it empty is safe for rotation-free operation.
-- `auth.dumpBaseUrl` + `auth.dumpPath` — optional. Concatenated verbatim into the dump URL. Empty `dumpPath` disables restore; if `dumpPath` is set, `dumpBaseUrl` is required. Both are non-secret (plain env vars in the pod spec) — do **not** embed credentials in the URL.
-- `auth.dumpAuth.type` ∈ `none | basic | bearer`:
+This block is **first-init only**: the credentials seed the DB the first time it is initialized, and the dump/restore config runs only at that first init. Re-rendering it does not re-seed an existing database.
+
+- `init.database` (default `postgres`) — DB created by the entrypoint.
+- `init.username` (default `postgres`) — superuser created by the entrypoint.
+- `init.password` — if empty, a random 32-char password is generated on first install. It's preserved across upgrades via a `lookup` on the existing `<release>-tcpg-pg-credential` Secret, so setting it empty is safe for rotation-free operation under plain `helm upgrade`. **Under GitOps (ArgoCD/Flux) this is unsafe:** `lookup` returns nothing under `helm template`, so an empty password regenerates a new random value on every sync, which then drifts from the password already baked into the existing PVC and breaks authentication. Under GitOps, either set `init.password` explicitly or configure the Application to ignore the Secret's data — see [Running under ArgoCD / GitOps](#running-under-argocd--gitops).
+- `init.dumpBaseUrl` + `init.dumpPath` — optional. Concatenated verbatim into the dump URL. Empty `dumpPath` disables restore; if `dumpPath` is set, `dumpBaseUrl` is required. Both are non-secret (plain env vars in the pod spec) — do **not** embed credentials in the URL.
+- `init.dumpAuth.type` ∈ `none | basic | bearer`:
   - `none` — no auth header.
   - `basic` — `value` is `user:pass`, passed as `curl -u`.
   - `bearer` — `value` is the token, sent as `Authorization: Bearer <value>`.
-- `auth.dumpAuth.value` — the only secret. Stored in a dedicated chart-managed Secret named `<release>-tcpg-load-credential` (separate from the main `<release>-tcpg-pg-credential` that Postgres reads — prevents the dump auth from leaking into the Postgres container env).
-- `auth.existingDumpAuthSecret.{name,key}` — alternative: reference a pre-existing Secret instead of setting `dumpAuth.value` inline. Mutually exclusive with inline; template validation fails hard if both are set.
-- `auth.dumpInsecureSkipTlsVerify` (default `false`) — `curl -k` for the download. Use only for internal / self-signed hosts.
+- `init.dumpAuth.value` — the only secret. Stored in a dedicated chart-managed Secret named `<release>-tcpg-load-credential` (separate from the main `<release>-tcpg-pg-credential` that Postgres reads — prevents the dump auth from leaking into the Postgres container env).
+- `init.existingDumpAuthSecret.{name,key}` — alternative: reference a pre-existing Secret instead of setting `dumpAuth.value` inline. Mutually exclusive with inline; template validation fails hard if both are set.
+- `init.dumpInsecureSkipTlsVerify` (default `false`) — `curl -k` for the download. Use only for internal / self-signed hosts.
+
+#### Running under ArgoCD / GitOps
+
+The generated DB password lives only in the `<release>-tcpg-pg-credential` Secret and is reused via a Helm `lookup`. But `lookup` is **blind** under `helm template` (which is how ArgoCD and Flux render the chart): it always returns empty. So if `init.password` is empty, a brand-new random password is generated on **every sync** and overwrites the Secret — which then no longer matches the password baked into the existing PVC, and Postgres auth fails.
+
+Two ways to make GitOps safe:
+
+1. **Set `init.password` explicitly** in your values/overlay. Simple and deterministic.
+2. **Let the chart generate it once, then never overwrite it.** Configure the ArgoCD `Application` to ignore the Secret's `/data` and respect that during sync, so the first-generated password is written once and left alone:
+
+```yaml
+spec:
+  ignoreDifferences:
+    - group: ""
+      kind: Secret
+      name: <release>-tcpg-pg-credential
+      jsonPointers:
+        - /data
+  syncPolicy:
+    syncOptions:
+      - RespectIgnoreDifferences=true
+```
+
+**Recovery if drift already happened.** The live PVC still holds the *original* password (it was baked in at first init). First stabilize the password — set `init.password` to the value currently in the live Secret (or apply the `ignoreDifferences` config above) so it stops changing. If the data is disposable or dump-restorable, you can then delete the StatefulSet **and** its PVC so a fresh first-init bakes in the now-stable password.
 
 **Using an externally-managed Secret for dump auth.** Instead of inlining `dumpAuth.value`, reference a pre-existing Secret — useful when the credential is managed by SealedSecrets, External Secrets Operator, Vault, etc.
 
@@ -117,7 +145,7 @@ kubectl -n <namespace> create secret generic dump-credentials \
 Then in values:
 
 ```yaml
-auth:
+init:
   dumpBaseUrl: "https://dumps.example.internal:8080"
   dumpPath: "/path/to/init-db.dump"
   dumpAuth:
@@ -197,7 +225,7 @@ Override only if you know why.
 ### Images
 
 - `image.{repository,tag,pullPolicy,pullSecrets}` — main Postgres image (default `postgres:18.1`).
-- `initImage.{repository,tag,pullPolicy}` — curl image used by the dump-download init container (default `curlimages/curl:8.11.1`). Only runs when `auth.dumpPath` is set.
+- `initImage.{repository,tag,pullPolicy}` — curl image used by the dump-download init container (default `curlimages/curl:8.11.1`). Only runs when `init.dumpPath` is set.
 
 ## Connecting
 
@@ -207,9 +235,9 @@ The chart renders a consumer-facing Secret `<release>-tcpg-pg-credential` with e
 |---------------------|-----------------------------------------------------------------|
 | `POSTGRES_HOST`     | `<release>-tcpg.<namespace>.svc.cluster.local`                  |
 | `POSTGRES_PORT`     | `5432` (or `service.port` override)                             |
-| `POSTGRES_DB`       | `auth.database`                                                 |
-| `POSTGRES_USER`     | `auth.username`                                                 |
-| `POSTGRES_PASSWORD` | `auth.password` (or the 32-char autogen value)                  |
+| `POSTGRES_DB`       | `init.database`                                                 |
+| `POSTGRES_USER`     | `init.username`                                                 |
+| `POSTGRES_PASSWORD` | `init.password` (or the 32-char autogen value)                 |
 | `POSTGRES_URI`      | `postgres://<user>:<pass>@<host>:<port>/<db>` (URL-encoded)     |
 
 App pods can bind the whole thing via `envFrom`:

@@ -10,8 +10,8 @@ tests:
 
   - it: emits ConfigMap with restore script and entrypoint wrapper when dumpPath is set
     set:
-      tcpg.auth.dumpBaseUrl: https://example.com
-      tcpg.auth.dumpPath: /d.dump
+      tcpg.init.dumpBaseUrl: https://example.com
+      tcpg.init.dumpPath: /d.dump
     asserts:
       - isKind: { of: ConfigMap }
       - exists: { path: 'data["10-restore.sh"]' }
@@ -19,8 +19,8 @@ tests:
 
   - it: restore script handles all three formats and writes the sentinel
     set:
-      tcpg.auth.dumpBaseUrl: https://example.com
-      tcpg.auth.dumpPath: /d.dump
+      tcpg.init.dumpBaseUrl: https://example.com
+      tcpg.init.dumpPath: /d.dump
     asserts:
       - matchRegex:
           path: 'data["10-restore.sh"]'
@@ -40,8 +40,8 @@ tests:
 
   - it: wrapper checks the sentinel and exits non-zero on missing
     set:
-      tcpg.auth.dumpBaseUrl: https://example.com
-      tcpg.auth.dumpPath: /d.dump
+      tcpg.init.dumpBaseUrl: https://example.com
+      tcpg.init.dumpPath: /d.dump
     asserts:
       - matchRegex:
           path: 'data["entrypoint-wrapper.sh"]'

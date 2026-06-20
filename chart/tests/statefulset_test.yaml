@@ -52,8 +52,8 @@ tests:
   - it: init container meets restricted PSS
     template: tcpg/postgres.yaml
     set:
-      tcpg.auth.dumpBaseUrl: https://example.com
-      tcpg.auth.dumpPath: /d.dump
+      tcpg.init.dumpBaseUrl: https://example.com
+      tcpg.init.dumpPath: /d.dump
     asserts:
       - equal:
           path: spec.template.spec.initContainers[0].securityContext.allowPrivilegeEscalation
@@ -87,10 +87,10 @@ tests:
   - it: main container envFrom does not reference the load-credential secret (no DUMP_AUTH_VALUE leak)
     template: tcpg/postgres.yaml
     set:
-      tcpg.auth.dumpBaseUrl: https://example.com
-      tcpg.auth.dumpPath: /d.dump
-      tcpg.auth.dumpAuth.type: basic
-      tcpg.auth.dumpAuth.value: user:pw
+      tcpg.init.dumpBaseUrl: https://example.com
+      tcpg.init.dumpPath: /d.dump
+      tcpg.init.dumpAuth.type: basic
+      tcpg.init.dumpAuth.value: user:pw
     asserts:
       - notContains:
           path: spec.template.spec.containers[0].envFrom
@@ -124,8 +124,8 @@ tests:
   - it: adds curl initContainer with no-auth case when dumpAuth.type is none
     template: tcpg/postgres.yaml
     set:
-      tcpg.auth.dumpBaseUrl: https://example.com
-      tcpg.auth.dumpPath: /d.dump
+      tcpg.init.dumpBaseUrl: https://example.com
+      tcpg.init.dumpPath: /d.dump
     asserts:
       - equal:
           path: spec.template.spec.initContainers[0].name
@@ -156,9 +156,9 @@ tests:
   - it: sets DUMP_INSECURE_SKIP_TLS_VERIFY to true when configured
     template: tcpg/postgres.yaml
     set:
-      tcpg.auth.dumpBaseUrl: https://self-signed.example.com
-      tcpg.auth.dumpPath: /d.dump
-      tcpg.auth.dumpInsecureSkipTlsVerify: true
+      tcpg.init.dumpBaseUrl: https://self-signed.example.com
+      tcpg.init.dumpPath: /d.dump
+      tcpg.init.dumpInsecureSkipTlsVerify: true
     asserts:
       - contains:
           path: spec.template.spec.initContainers[0].env
@@ -167,8 +167,8 @@ tests:
   - it: defaults DUMP_INSECURE_SKIP_TLS_VERIFY to false
     template: tcpg/postgres.yaml
     set:
-      tcpg.auth.dumpBaseUrl: https://example.com
-      tcpg.auth.dumpPath: /d.dump
+      tcpg.init.dumpBaseUrl: https://example.com
+      tcpg.init.dumpPath: /d.dump
     asserts:
       - contains:
           path: spec.template.spec.initContainers[0].env
@@ -177,10 +177,10 @@ tests:
   - it: wires DUMP_AUTH_VALUE from chart-managed secret for basic auth
     template: tcpg/postgres.yaml
     set:
-      tcpg.auth.dumpBaseUrl: https://example.com
-      tcpg.auth.dumpPath: /d.dump
-      tcpg.auth.dumpAuth.type: basic
-      tcpg.auth.dumpAuth.value: user:pw
+      tcpg.init.dumpBaseUrl: https://example.com
+      tcpg.init.dumpPath: /d.dump
+      tcpg.init.dumpAuth.type: basic
+      tcpg.init.dumpAuth.value: user:pw
     asserts:
       - contains:
           path: spec.template.spec.initContainers[0].env
@@ -197,11 +197,11 @@ tests:
   - it: wires DUMP_AUTH_VALUE from externally-managed secret when configured
     template: tcpg/postgres.yaml
     set:
-      tcpg.auth.dumpBaseUrl: https://example.com
-      tcpg.auth.dumpPath: /d.dump
-      tcpg.auth.dumpAuth.type: bearer
-      tcpg.auth.existingDumpAuthSecret.name: external-dump-auth
-      tcpg.auth.existingDumpAuthSecret.key: my-token-key
+      tcpg.init.dumpBaseUrl: https://example.com
+      tcpg.init.dumpPath: /d.dump
+      tcpg.init.dumpAuth.type: bearer
+      tcpg.init.existingDumpAuthSecret.name: external-dump-auth
+      tcpg.init.existingDumpAuthSecret.key: my-token-key
     asserts:
       - contains:
           path: spec.template.spec.initContainers[0].env
@@ -218,76 +218,76 @@ tests:
   - it: fails when dumpAuth.type is invalid
     template: tcpg/postgres.yaml
     set:
-      tcpg.auth.dumpBaseUrl: https://example.com
-      tcpg.auth.dumpPath: /d.dump
-      tcpg.auth.dumpAuth.type: oauth
+      tcpg.init.dumpBaseUrl: https://example.com
+      tcpg.init.dumpPath: /d.dump
+      tcpg.init.dumpAuth.type: oauth
     asserts:
       - failedTemplate:
-          errorMessage: "tcpg.auth.dumpAuth.type must be one of: none, basic, bearer"
+          errorMessage: "tcpg.init.dumpAuth.type must be one of: none, basic, bearer"
 
   - it: fails when basic/bearer is set without a value source
     template: tcpg/postgres.yaml
     set:
-      tcpg.auth.dumpBaseUrl: https://example.com
-      tcpg.auth.dumpPath: /d.dump
-      tcpg.auth.dumpAuth.type: basic
+      tcpg.init.dumpBaseUrl: https://example.com
+      tcpg.init.dumpPath: /d.dump
+      tcpg.init.dumpAuth.type: basic
     asserts:
       - failedTemplate:
-          errorMessage: "tcpg.auth.dumpAuth.type is basic/bearer but no value source is configured; provide tcpg.auth.dumpAuth.value or tcpg.auth.existingDumpAuthSecret.name"
+          errorMessage: "tcpg.init.dumpAuth.type is basic/bearer but no value source is configured; provide tcpg.init.dumpAuth.value or tcpg.init.existingDumpAuthSecret.name"
 
   - it: fails when both inline and external auth value sources are set
     template: tcpg/postgres.yaml
     set:
-      tcpg.auth.dumpBaseUrl: https://example.com
-      tcpg.auth.dumpPath: /d.dump
-      tcpg.auth.dumpAuth.type: basic
-      tcpg.auth.dumpAuth.value: user:pw
-      tcpg.auth.existingDumpAuthSecret.name: external-dump-auth
+      tcpg.init.dumpBaseUrl: https://example.com
+      tcpg.init.dumpPath: /d.dump
+      tcpg.init.dumpAuth.type: basic
+      tcpg.init.dumpAuth.value: user:pw
+      tcpg.init.existingDumpAuthSecret.name: external-dump-auth
     asserts:
       - failedTemplate:
-          errorMessage: "Set either tcpg.auth.dumpAuth.value (inline) or tcpg.auth.existingDumpAuthSecret.name (external), not both"
+          errorMessage: "Set either tcpg.init.dumpAuth.value (inline) or tcpg.init.existingDumpAuthSecret.name (external), not both"
 
   - it: fails when dumpPath is set but dumpBaseUrl is empty
     template: tcpg/postgres.yaml
     set:
-      tcpg.auth.dumpPath: /d.dump
+      tcpg.init.dumpPath: /d.dump
     asserts:
       - failedTemplate:
-          errorMessage: "tcpg.auth.dumpBaseUrl is required when tcpg.auth.dumpPath is set"
+          errorMessage: "tcpg.init.dumpBaseUrl is required when tcpg.init.dumpPath is set"
 
   - it: fails when existingDumpAuthSecret.name is set but dumpAuth.type is none
     template: tcpg/postgres.yaml
     set:
-      tcpg.auth.dumpBaseUrl: https://example.com
-      tcpg.auth.dumpPath: /d.dump
-      tcpg.auth.existingDumpAuthSecret.name: external-dump-auth
+      tcpg.init.dumpBaseUrl: https://example.com
+      tcpg.init.dumpPath: /d.dump
+      tcpg.init.existingDumpAuthSecret.name: external-dump-auth
     asserts:
       - failedTemplate:
-          errorMessage: "tcpg.auth.existingDumpAuthSecret.name is set but tcpg.auth.dumpAuth.type is 'none'; set type to basic/bearer or clear existingDumpAuthSecret.name"
+          errorMessage: "tcpg.init.existingDumpAuthSecret.name is set but tcpg.init.dumpAuth.type is 'none'; set type to basic/bearer or clear existingDumpAuthSecret.name"
 
   - it: fails when dumpBaseUrl and dumpPath would produce a double slash
     template: tcpg/postgres.yaml
     set:
-      tcpg.auth.dumpBaseUrl: https://example.com/
-      tcpg.auth.dumpPath: /d.dump
+      tcpg.init.dumpBaseUrl: https://example.com/
+      tcpg.init.dumpPath: /d.dump
     asserts:
       - failedTemplate:
-          errorMessage: "tcpg.auth.dumpBaseUrl ends with '/' and tcpg.auth.dumpPath starts with '/' — would produce '//' in URL; remove one"
+          errorMessage: "tcpg.init.dumpBaseUrl ends with '/' and tcpg.init.dumpPath starts with '/' — would produce '//' in URL; remove one"
 
   - it: fails when dumpBaseUrl and dumpPath have no slash between them
     template: tcpg/postgres.yaml
     set:
-      tcpg.auth.dumpBaseUrl: https://example.com
-      tcpg.auth.dumpPath: d.dump
+      tcpg.init.dumpBaseUrl: https://example.com
+      tcpg.init.dumpPath: d.dump
     asserts:
       - failedTemplate:
-          errorMessage: "tcpg.auth.dumpBaseUrl and tcpg.auth.dumpPath have no slash between them; add trailing '/' to dumpBaseUrl or leading '/' to dumpPath"
+          errorMessage: "tcpg.init.dumpBaseUrl and tcpg.init.dumpPath have no slash between them; add trailing '/' to dumpBaseUrl or leading '/' to dumpPath"
 
   - it: accepts trailing slash on dumpBaseUrl without leading slash on dumpPath
     template: tcpg/postgres.yaml
     set:
-      tcpg.auth.dumpBaseUrl: https://example.com/
-      tcpg.auth.dumpPath: d.dump
+      tcpg.init.dumpBaseUrl: https://example.com/
+      tcpg.init.dumpPath: d.dump
     asserts:
       - equal:
           path: spec.template.spec.initContainers[0].name
@@ -296,8 +296,8 @@ tests:
   - it: overrides command to entrypoint wrapper when dumpPath is set
     template: tcpg/postgres.yaml
     set:
-      tcpg.auth.dumpBaseUrl: https://example.com
-      tcpg.auth.dumpPath: /d.dump
+      tcpg.init.dumpBaseUrl: https://example.com
+      tcpg.init.dumpPath: /d.dump
     asserts:
       - equal:
           path: spec.template.spec.containers[0].command
@@ -312,8 +312,8 @@ tests:
   - it: mounts dump, restore-script, and wrapper when dumpPath is set
     template: tcpg/postgres.yaml
     set:
-      tcpg.auth.dumpBaseUrl: https://example.com
-      tcpg.auth.dumpPath: /d.dump
+      tcpg.init.dumpBaseUrl: https://example.com
+      tcpg.init.dumpPath: /d.dump
     asserts:
       - contains:
           path: spec.template.spec.containers[0].volumeMounts
@@ -347,8 +347,8 @@ tests:
   - it: includes restore-script checksum annotation only when dumpPath is set
     template: tcpg/postgres.yaml
     set:
-      tcpg.auth.dumpBaseUrl: https://example.com
-      tcpg.auth.dumpPath: /d.dump
+      tcpg.init.dumpBaseUrl: https://example.com
+      tcpg.init.dumpPath: /d.dump
     asserts:
       - exists:
           path: 'spec.template.metadata.annotations["checksum/restore-script"]'
