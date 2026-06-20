@@ -32,13 +32,15 @@ tcpg:
     # Consumed by: the app, via the `tcpg-pg-credential` Secret (POSTGRES_PASSWORD).
     password: "CHANGE-ME-db-password"   # REQUIRED (GitOps) / optional (plain Helm)
 
-    # optional — one-shot restore on FIRST init only. Effective URL = dumpBaseUrl + dumpPath.
-    dumpBaseUrl: ""             # optional, e.g. https://dumps.example.internal:8080
-    dumpPath: ""               # optional, e.g. /path/to/init-db.dump (empty → no restore)
-    dumpAuth:
-      type: none               # optional: none | basic | bearer
-      value: ""                # optional: "user:pass" (basic) or token (bearer)
-    dumpInsecureSkipTlsVerify: false   # optional: set true for internal self-signed dump hosts
+    # optional — one-shot restore on FIRST init only. Effective URL = restore.baseUrl + restore.path.
+    restore:
+      enabled: false           # SOLE on/off gate — whole block ignored when false
+      baseUrl: ""              # required when enabled, e.g. https://dumps.example.internal:8080
+      path: ""                # required when enabled, e.g. /path/to/init-db.dump
+      insecureSkipTlsVerify: false   # optional: set true for internal self-signed dump hosts
+      auth:
+        type: none             # optional: none | basic | bearer
+        value: ""              # optional: "user:pass" (basic) or token (bearer)
 
 # === MinIO (S3-compatible object store) ======================================
 minio:
@@ -77,19 +79,21 @@ helm install mydb oci://gitea.local.togglecorp.com/togglecorp/banjo-alpha-deps -
   -f values.yaml
 ```
 
-Where `values.yaml` provides per-install specifics (password, dump source, etc.). Note `dumpInsecureSkipTlsVerify` stays `false` in the defaults — set it per-install when your dump host uses an internal/self-signed cert:
+Where `values.yaml` provides per-install specifics (password, dump source, etc.). Note `restore.insecureSkipTlsVerify` stays `false` in the defaults — set it per-install when your dump host uses an internal/self-signed cert:
 
 ```yaml
 tcpg:
   enabled: true
   init:
     password: "your-db-password-here"
-    dumpBaseUrl: "https://dumps.example.internal:8080"
-    dumpPath: "/path/to/init-db.dump"
-    dumpInsecureSkipTlsVerify: true   # per-install: internal self-signed dump host
-    dumpAuth:
-      type: basic
-      value: "dump-user:dump-password-here"
+    restore:
+      enabled: true
+      baseUrl: "https://dumps.example.internal:8080"
+      path: "/path/to/init-db.dump"
+      insecureSkipTlsVerify: true   # per-install: internal self-signed dump host
+      auth:
+        type: basic
+        value: "dump-user:dump-password-here"
 ```
 
 ## Example: dump restore overlay
@@ -107,19 +111,21 @@ tcpg:
     # "Password persistence: plain Helm vs GitOps" below).
     password: "your-db-password-here"
 
-    # One-shot restore on first init. Effective URL = dumpBaseUrl + dumpPath.
-    # Skipped when PGDATA is already populated.
-    dumpBaseUrl: "https://dumps.example.internal:8080"
-    dumpPath: "/path/to/init-db.dump"
+    # One-shot restore on first init. Effective URL = restore.baseUrl + restore.path.
+    # Gated by restore.enabled; skipped when PGDATA is already populated.
+    restore:
+      enabled: true
+      baseUrl: "https://dumps.example.internal:8080"
+      path: "/path/to/init-db.dump"
 
-    # Skip TLS verification for the dump host (internal self-signed cert).
-    dumpInsecureSkipTlsVerify: true
+      # Skip TLS verification for the dump host (internal self-signed cert).
+      insecureSkipTlsVerify: true
 
-    # Basic auth: value is "user:pass", passed to curl -u.
-    # For bearer, set type: bearer and value: <token>.
-    dumpAuth:
-      type: basic
-      value: "dump-user:dump-password-here"
+      # Basic auth: value is "user:pass", passed to curl -u.
+      # For bearer, set type: bearer and value: <token>.
+      auth:
+        type: basic
+        value: "dump-user:dump-password-here"
 ```
 
 ## Option reference
@@ -131,14 +137,15 @@ This block is **first-init only**: the credentials seed the DB the first time it
 - `init.database` (default `postgres`) — DB created by the entrypoint.
 - `init.username` (default `postgres`) — superuser created by the entrypoint.
 - `init.password` — if empty, a random 32-char password is generated on first install. It's preserved across upgrades via a `lookup` on the existing `tcpg-pg-credential` Secret, so setting it empty is safe for rotation-free operation under plain `helm upgrade`. **Under GitOps (ArgoCD/Flux) this is unsafe:** `lookup` returns nothing under `helm template`, so an empty password regenerates a new random value on every sync, which then drifts from the password already baked into the existing PVC and breaks authentication. Under GitOps, either set `init.password` explicitly or configure the Application to ignore the Secret's data — see [Running under ArgoCD / GitOps](#running-under-argocd--gitops).
-- `init.dumpBaseUrl` + `init.dumpPath` — optional. Concatenated verbatim into the dump URL. Empty `dumpPath` disables restore; if `dumpPath` is set, `dumpBaseUrl` is required. Both are non-secret (plain env vars in the pod spec) — do **not** embed credentials in the URL.
-- `init.dumpAuth.type` ∈ `none | basic | bearer`:
+- `init.restore.enabled` (default `false`) — the **sole on/off gate** for the restore feature. When `false`, nothing restore-related renders (no init container, no ConfigMap, no `tcpg-restore-credential` Secret), regardless of the other fields below.
+- `init.restore.baseUrl` + `init.restore.path` — both **required** when `restore.enabled` is `true`. Concatenated verbatim into the dump URL. Both are non-secret (plain env vars in the pod spec) — do **not** embed credentials in the URL.
+- `init.restore.auth.type` ∈ `none | basic | bearer`:
   - `none` — no auth header.
   - `basic` — `value` is `user:pass`, passed as `curl -u`.
   - `bearer` — `value` is the token, sent as `Authorization: Bearer <value>`.
-- `init.dumpAuth.value` — the only secret. Stored in a dedicated chart-managed Secret named `tcpg-load-credential` (separate from the main `tcpg-pg-credential` that Postgres reads — prevents the dump auth from leaking into the Postgres container env).
-- `init.existingDumpAuthSecret.{name,key}` — alternative: reference a pre-existing Secret instead of setting `dumpAuth.value` inline. Mutually exclusive with inline; template validation fails hard if both are set.
-- `init.dumpInsecureSkipTlsVerify` (default `false`) — `curl -k` for the download. Use only for internal / self-signed hosts.
+- `init.restore.auth.value` — the only secret. Stored in a dedicated chart-managed Secret named `tcpg-restore-credential` (separate from the main `tcpg-pg-credential` that Postgres reads — prevents the dump auth from leaking into the Postgres container env). This holds a **user-supplied** value, not a lookup-generated one, so the GitOps regeneration caveat below does **not** apply to it.
+- `init.restore.auth.existingSecret.{name,key}` — alternative: reference a pre-existing Secret instead of setting `auth.value` inline. Mutually exclusive with inline (template validation fails hard if both are set). `key` has **no default** — set it explicitly; it is required whenever `existingSecret.name` is set.
+- `init.restore.insecureSkipTlsVerify` (default `false`) — `curl -k` for the download. Use only for internal / self-signed hosts.
 
 #### Password persistence: plain Helm vs GitOps
 
@@ -169,35 +176,37 @@ spec:
 
 **Recovery if drift already happened.** The live PVC still holds the *original* password (it was baked in at first init). First stabilize the password — set `init.password` to the value currently in the live Secret (or apply the `ignoreDifferences` config above) so it stops changing. If the data is disposable or dump-restorable, you can then delete the StatefulSet **and** its PVC so a fresh first-init bakes in the now-stable password.
 
-**Using an externally-managed Secret for dump auth.** Instead of inlining `dumpAuth.value`, reference a pre-existing Secret — useful when the credential is managed by SealedSecrets, External Secrets Operator, Vault, etc.
+**Using an externally-managed Secret for dump auth.** Instead of inlining `restore.auth.value`, reference a pre-existing Secret — useful when the credential is managed by SealedSecrets, External Secrets Operator, Vault, etc.
 
 Create (or have your operator create) the Secret in the same namespace:
 
 ```bash
 # For basic auth — value format is "user:pass"
 kubectl -n <namespace> create secret generic dump-credentials \
-  --from-literal=DUMP_AUTH_VALUE='dump-user:dump-password-here'
+  --from-literal=RESTORE_AUTH_VALUE='dump-user:dump-password-here'
 
 # For bearer — value is the raw token
 kubectl -n <namespace> create secret generic dump-credentials \
-  --from-literal=DUMP_AUTH_VALUE='eyJhbGciOi...'
+  --from-literal=RESTORE_AUTH_VALUE='eyJhbGciOi...'
 ```
 
 Then in values:
 
 ```yaml
 init:
-  dumpBaseUrl: "https://dumps.example.internal:8080"
-  dumpPath: "/path/to/init-db.dump"
-  dumpAuth:
-    type: basic      # or bearer — must match the value's format
-    # omit `value` when using existingDumpAuthSecret below
-  existingDumpAuthSecret:
-    name: dump-credentials
-    key: DUMP_AUTH_VALUE   # default; override if your Secret uses a different key
+  restore:
+    enabled: true
+    baseUrl: "https://dumps.example.internal:8080"
+    path: "/path/to/init-db.dump"
+    auth:
+      type: basic      # or bearer — must match the value's format
+      # omit `value` when using existingSecret below
+      existingSecret:
+        name: dump-credentials
+        key: RESTORE_AUTH_VALUE   # required — must match the key in your Secret
 ```
 
-Inline (`dumpAuth.value`) and external (`existingDumpAuthSecret.name`) are mutually exclusive — the template fails at render time if both are set.
+Inline (`restore.auth.value`) and external (`restore.auth.existingSecret.name`) are mutually exclusive — the template fails at render time if both are set.
 
 **Supported dump formats** (auto-detected in the postgres container): plain `.sql`, gzipped `.sql.gz`, and `pg_dump -Fc` custom format. Detection uses `gunzip -t` and `pg_restore -l` — no `file` dependency.
 
@@ -266,7 +275,7 @@ Override only if you know why.
 ### Images
 
 - `image.{repository,tag,pullPolicy,pullSecrets}` — main Postgres image (default `postgres:18.1`).
-- `initImage.{repository,tag,pullPolicy}` — curl image used by the dump-download init container (default `curlimages/curl:8.11.1`). Only runs when `init.dumpPath` is set.
+- `initImage.{repository,tag,pullPolicy}` — curl image used by the dump-download init container (default `curlimages/curl:8.11.1`). Only runs when `init.restore.enabled` is `true`.
 
 ## Connecting
 

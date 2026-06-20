@@ -21,7 +21,7 @@ spec:
         {{- include "tcpg.selectorLabels" . | nindent 8 }}
       annotations:
         checksum/secret: {{ include (print $.Template.BasePath "/tcpg/secrets.yaml") . | sha256sum }}
-        {{- if .Values.tcpg.init.dumpPath }}
+        {{- if .Values.tcpg.init.restore.enabled }}
         checksum/restore-script: {{ include (print $.Template.BasePath "/tcpg/configmap.yaml") . | sha256sum }}
         {{- end }}
     spec:
@@ -31,32 +31,38 @@ spec:
       {{- end }}
       securityContext:
         {{- toYaml .Values.tcpg.podSecurityContext | nindent 8 }}
-      {{- if .Values.tcpg.init.dumpPath }}
-      {{- if not .Values.tcpg.init.dumpBaseUrl -}}
-      {{- fail "tcpg.init.dumpBaseUrl is required when tcpg.init.dumpPath is set" -}}
+      {{- if .Values.tcpg.init.restore.enabled }}
+      {{- if not .Values.tcpg.init.restore.path -}}
+      {{- fail "tcpg.init.restore.path is required when tcpg.init.restore.enabled is true" -}}
       {{- end }}
-      {{- if not (has .Values.tcpg.init.dumpAuth.type (list "none" "basic" "bearer")) -}}
-      {{- fail "tcpg.init.dumpAuth.type must be one of: none, basic, bearer" -}}
+      {{- if not .Values.tcpg.init.restore.baseUrl -}}
+      {{- fail "tcpg.init.restore.baseUrl is required when tcpg.init.restore.enabled is true" -}}
       {{- end }}
-      {{- if eq .Values.tcpg.init.dumpAuth.type "none" }}
-      {{- if .Values.tcpg.init.existingDumpAuthSecret.name -}}
-      {{- fail "tcpg.init.existingDumpAuthSecret.name is set but tcpg.init.dumpAuth.type is 'none'; set type to basic/bearer or clear existingDumpAuthSecret.name" -}}
+      {{- if not (has .Values.tcpg.init.restore.auth.type (list "none" "basic" "bearer")) -}}
+      {{- fail "tcpg.init.restore.auth.type must be one of: none, basic, bearer" -}}
+      {{- end }}
+      {{- if eq .Values.tcpg.init.restore.auth.type "none" }}
+      {{- if .Values.tcpg.init.restore.auth.existingSecret.name -}}
+      {{- fail "tcpg.init.restore.auth.existingSecret.name is set but tcpg.init.restore.auth.type is 'none'; set type to basic/bearer or clear existingSecret.name" -}}
       {{- end }}
       {{- else }}
-      {{- if and .Values.tcpg.init.dumpAuth.value .Values.tcpg.init.existingDumpAuthSecret.name -}}
-      {{- fail "Set either tcpg.init.dumpAuth.value (inline) or tcpg.init.existingDumpAuthSecret.name (external), not both" -}}
+      {{- if and .Values.tcpg.init.restore.auth.value .Values.tcpg.init.restore.auth.existingSecret.name -}}
+      {{- fail "Set either tcpg.init.restore.auth.value (inline) or tcpg.init.restore.auth.existingSecret.name (external), not both" -}}
       {{- end }}
-      {{- if and (not .Values.tcpg.init.dumpAuth.value) (not .Values.tcpg.init.existingDumpAuthSecret.name) -}}
-      {{- fail "tcpg.init.dumpAuth.type is basic/bearer but no value source is configured; provide tcpg.init.dumpAuth.value or tcpg.init.existingDumpAuthSecret.name" -}}
+      {{- if and (not .Values.tcpg.init.restore.auth.value) (not .Values.tcpg.init.restore.auth.existingSecret.name) -}}
+      {{- fail "tcpg.init.restore.auth.type is basic/bearer but no value source is configured; provide tcpg.init.restore.auth.value or tcpg.init.restore.auth.existingSecret.name" -}}
+      {{- end }}
+      {{- if and .Values.tcpg.init.restore.auth.existingSecret.name (not .Values.tcpg.init.restore.auth.existingSecret.key) -}}
+      {{- fail "tcpg.init.restore.auth.existingSecret.key is required when existingSecret.name is set" -}}
       {{- end }}
       {{- end }}
-      {{- $baseHasSlash := hasSuffix "/" .Values.tcpg.init.dumpBaseUrl -}}
-      {{- $pathHasSlash := hasPrefix "/" .Values.tcpg.init.dumpPath -}}
+      {{- $baseHasSlash := hasSuffix "/" .Values.tcpg.init.restore.baseUrl -}}
+      {{- $pathHasSlash := hasPrefix "/" .Values.tcpg.init.restore.path -}}
       {{- if and $baseHasSlash $pathHasSlash -}}
-      {{- fail "tcpg.init.dumpBaseUrl ends with '/' and tcpg.init.dumpPath starts with '/' — would produce '//' in URL; remove one" -}}
+      {{- fail "tcpg.init.restore.baseUrl ends with '/' and tcpg.init.restore.path starts with '/' — would produce '//' in URL; remove one" -}}
       {{- end }}
       {{- if and (not $baseHasSlash) (not $pathHasSlash) -}}
-      {{- fail "tcpg.init.dumpBaseUrl and tcpg.init.dumpPath have no slash between them; add trailing '/' to dumpBaseUrl or leading '/' to dumpPath" -}}
+      {{- fail "tcpg.init.restore.baseUrl and tcpg.init.restore.path have no slash between them; add trailing '/' to restore.baseUrl or leading '/' to restore.path" -}}
       {{- end }}
       initContainers:
         - name: download-dump
@@ -69,63 +75,63 @@ spec:
             - -c
             - |
               set -eu
-              LOCAL_DUMP_PATH="/dump/dump"
+              LOCAL_RESTORE_PATH="/restore/dump"
               if [ -s /var/lib/postgresql/data/pgdata/PG_VERSION ]; then
                 echo "PGDATA already initialized; skipping dump download."
                 exit 0
               fi
-              FULL_URL="${DUMP_BASE_URL}${DUMP_PATH}"
-              echo "Downloading dump from $FULL_URL... -> $LOCAL_DUMP_PATH"
+              FULL_URL="${RESTORE_BASE_URL}${RESTORE_PATH}"
+              echo "Downloading dump from $FULL_URL... -> $LOCAL_RESTORE_PATH"
               curl_download() {
-                if [ "$DUMP_INSECURE_SKIP_TLS_VERIFY" = "true" ]; then
+                if [ "$RESTORE_INSECURE_SKIP_TLS_VERIFY" = "true" ]; then
                   curl -k -D - -fsSL --retry 3 --retry-delay 5 "$@"
                 else
                   curl -D - -fsSL --retry 3 --retry-delay 5 "$@"
                 fi
               }
-              if [ "$DUMP_INSECURE_SKIP_TLS_VERIFY" = "true" ]; then
+              if [ "$RESTORE_INSECURE_SKIP_TLS_VERIFY" = "true" ]; then
                 echo "WARNING: TLS certificate verification is disabled (-k)"
               fi
-              case "$DUMP_AUTH_TYPE" in
+              case "$RESTORE_AUTH_TYPE" in
                 basic)
-                  curl_download -u "$DUMP_AUTH_VALUE" -o "$LOCAL_DUMP_PATH" "$FULL_URL"
+                  curl_download -u "$RESTORE_AUTH_VALUE" -o "$LOCAL_RESTORE_PATH" "$FULL_URL"
                   ;;
                 bearer)
-                  curl_download -H "Authorization: Bearer $DUMP_AUTH_VALUE" -o "$LOCAL_DUMP_PATH" "$FULL_URL"
+                  curl_download -H "Authorization: Bearer $RESTORE_AUTH_VALUE" -o "$LOCAL_RESTORE_PATH" "$FULL_URL"
                   ;;
                 none)
-                  curl_download -o "$LOCAL_DUMP_PATH" "$FULL_URL"
+                  curl_download -o "$LOCAL_RESTORE_PATH" "$FULL_URL"
                   ;;
                 *)
-                  echo "Unknown DUMP_AUTH_TYPE: $DUMP_AUTH_TYPE (expected none, basic, bearer)" >&2
+                  echo "Unknown RESTORE_AUTH_TYPE: $RESTORE_AUTH_TYPE (expected none, basic, bearer)" >&2
                   exit 1
                   ;;
               esac
-              du -sh "$LOCAL_DUMP_PATH"
+              du -sh "$LOCAL_RESTORE_PATH"
           env:
-            - name: DUMP_BASE_URL
-              value: {{ .Values.tcpg.init.dumpBaseUrl | quote }}
-            - name: DUMP_PATH
-              value: {{ .Values.tcpg.init.dumpPath | quote }}
-            - name: DUMP_AUTH_TYPE
-              value: {{ .Values.tcpg.init.dumpAuth.type | quote }}
-            - name: DUMP_INSECURE_SKIP_TLS_VERIFY
-              value: {{ .Values.tcpg.init.dumpInsecureSkipTlsVerify | quote }}
-            {{- if ne .Values.tcpg.init.dumpAuth.type "none" }}
-            - name: DUMP_AUTH_VALUE
+            - name: RESTORE_BASE_URL
+              value: {{ .Values.tcpg.init.restore.baseUrl | quote }}
+            - name: RESTORE_PATH
+              value: {{ .Values.tcpg.init.restore.path | quote }}
+            - name: RESTORE_AUTH_TYPE
+              value: {{ .Values.tcpg.init.restore.auth.type | quote }}
+            - name: RESTORE_INSECURE_SKIP_TLS_VERIFY
+              value: {{ .Values.tcpg.init.restore.insecureSkipTlsVerify | quote }}
+            {{- if ne .Values.tcpg.init.restore.auth.type "none" }}
+            - name: RESTORE_AUTH_VALUE
               valueFrom:
                 secretKeyRef:
-                  {{- if .Values.tcpg.init.existingDumpAuthSecret.name }}
-                  name: {{ .Values.tcpg.init.existingDumpAuthSecret.name | quote }}
-                  key: {{ .Values.tcpg.init.existingDumpAuthSecret.key | quote }}
+                  {{- if .Values.tcpg.init.restore.auth.existingSecret.name }}
+                  name: {{ .Values.tcpg.init.restore.auth.existingSecret.name | quote }}
+                  key: {{ .Values.tcpg.init.restore.auth.existingSecret.key | quote }}
                   {{- else }}
-                  name: {{ include "tcpg.loadSecretName" . }}
-                  key: DUMP_AUTH_VALUE
+                  name: {{ include "tcpg.restoreSecretName" . }}
+                  key: RESTORE_AUTH_VALUE
                   {{- end }}
             {{- end }}
           volumeMounts:
-            - name: dump
-              mountPath: /dump
+            - name: restore
+              mountPath: /restore
             - name: pg-data
               mountPath: /var/lib/postgresql/data
             - name: tmp
@@ -137,7 +143,7 @@ spec:
           imagePullPolicy: {{ .Values.tcpg.image.pullPolicy }}
           securityContext:
             {{- toYaml .Values.tcpg.containerSecurityContext | nindent 12 }}
-          {{- if .Values.tcpg.init.dumpPath }}
+          {{- if .Values.tcpg.init.restore.enabled }}
           command:
             - /bin/sh
             - /etc/postgres-wrapper/entrypoint-wrapper.sh
@@ -151,7 +157,7 @@ spec:
           env:
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
-            {{- if .Values.tcpg.init.dumpPath }}
+            {{- if .Values.tcpg.init.restore.enabled }}
             - name: PG_PVC_NAME
               value: {{ template "tcpg.fullname" . }}-pg-data
             {{- end }}
@@ -196,10 +202,10 @@ spec:
               mountPath: /tmp
             - name: run-postgresql
               mountPath: /var/run/postgresql
-            {{- if .Values.tcpg.init.dumpPath }}
-            # /dump is RW: 10-restore.sh deletes the dump after a successful restore to free the emptyDir.
-            - name: dump
-              mountPath: /dump
+            {{- if .Values.tcpg.init.restore.enabled }}
+            # /restore is RW: 10-restore.sh deletes the dump after a successful restore to free the emptyDir.
+            - name: restore
+              mountPath: /restore
             - name: restore-script
               mountPath: /docker-entrypoint-initdb.d
               readOnly: true
@@ -231,8 +237,8 @@ spec:
           emptyDir: {}
         - name: run-postgresql
           emptyDir: {}
-        {{- if .Values.tcpg.init.dumpPath }}
-        - name: dump
+        {{- if .Values.tcpg.init.restore.enabled }}
+        - name: restore
           emptyDir: {}
         - name: restore-script
           configMap:

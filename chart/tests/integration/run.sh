@@ -37,7 +37,7 @@ run_pg() {
     --tmpfs /tmp \
     --tmpfs /var/run/postgresql \
     -v "$pgdata:/var/lib/postgresql/data" \
-    -v "$dump_dir:/dump" \
+    -v "$dump_dir:/restore" \
     -v "$SCRIPTS/10-restore.sh:/docker-entrypoint-initdb.d/10-restore.sh:ro" \
     -v "$SCRIPTS/entrypoint-wrapper.sh:/etc/postgres-wrapper/entrypoint-wrapper.sh:ro" \
     --entrypoint /bin/sh \
@@ -58,7 +58,7 @@ start_pg_detached() {
     --tmpfs /tmp \
     --tmpfs /var/run/postgresql \
     -v "$pgdata:/var/lib/postgresql/data" \
-    -v "$dump_dir:/dump" \
+    -v "$dump_dir:/restore" \
     -v "$SCRIPTS/10-restore.sh:/docker-entrypoint-initdb.d/10-restore.sh:ro" \
     -v "$SCRIPTS/entrypoint-wrapper.sh:/etc/postgres-wrapper/entrypoint-wrapper.sh:ro" \
     --entrypoint /bin/sh \

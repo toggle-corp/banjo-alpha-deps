@@ -46,31 +46,39 @@ tcpg:
     # is fine: a random password is generated on first install and preserved
     # across upgrades via the lookup.
     password: ""
-    # Optional one-shot restore on first init. Effective URL is dumpBaseUrl + dumpPath,
-    # concatenated verbatim at runtime. Both are non-secret (plain env vars, visible
-    # in the pod spec). Empty dumpPath → no restore. Authentication is handled
-    # separately via dumpAuth below — do NOT embed credentials in the URL.
+    # Optional one-shot restore on first init. The whole block is gated by
+    # `restore.enabled` — when false, nothing restore-related renders (no init
+    # container, no configmap, no restore-credential secret), regardless of the
+    # other fields below.
+    #
+    # Effective URL is restore.baseUrl + restore.path, concatenated verbatim at
+    # runtime. Both are non-secret (plain env vars, visible in the pod spec).
+    # Authentication is handled separately via restore.auth below — do NOT embed
+    # credentials in the URL.
     #
     # Supports plain .sql, .sql.gz, `pg_dump -Fc`.
-    dumpBaseUrl: ""   # e.g. https://example.com
-    dumpPath: ""      # e.g. /dumps/prod/db.sql.gz
-    # Auth for the dump download.
-    #   type: none   — no auth header
-    #   type: basic  — value is "user:pass", passed via curl -u
-    #   type: bearer — value is the token, sent as Authorization: Bearer <value>
-    # Only dumpAuth.value is secret. Either set it inline (stored in the chart-
-    # managed Secret) OR reference an externally-managed Secret via
-    # existingDumpAuthSecret.{name,key}. The two are mutually exclusive.
-    dumpAuth:
-      type: none
-      value: ""
-    existingDumpAuthSecret:
-      name: ""
-      key: DUMP_AUTH_VALUE
-    # Skip TLS certificate verification for the dump download (curl -k). Use only
-    # when the dump server presents a self-signed or internal-CA cert. Verify the
-    # host out-of-band; this disables MITM protection for the download.
-    dumpInsecureSkipTlsVerify: false
+    restore:
+      enabled: false          # SOLE gate; whole block ignored when false
+      baseUrl: ""             # e.g. https://example.com
+      path: ""                # e.g. /dumps/prod/db.sql.gz
+      # Skip TLS certificate verification for the download (curl -k). Use only
+      # when the server presents a self-signed or internal-CA cert. Verify the
+      # host out-of-band; this disables MITM protection for the download.
+      insecureSkipTlsVerify: false
+      # Auth for the download.
+      #   type: none   — no auth header
+      #   type: basic  — value is "user:pass", passed via curl -u
+      #   type: bearer — value is the token, sent as Authorization: Bearer <value>
+      # Only auth.value is secret. Either set it inline (stored in the chart-
+      # managed Secret) OR reference an externally-managed Secret via
+      # auth.existingSecret.{name,key}. The two are mutually exclusive — provide
+      # exactly one when type != none.
+      auth:
+        type: none            # none | basic | bearer
+        value: ""             # inline auth value ─┐ exactly one when type != none
+        existingSecret:        # external secret ref ┘
+          name: ""
+          key: ""             # NO default — user must set it
 
   service:
     type: ClusterIP

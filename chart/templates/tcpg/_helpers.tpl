@@ -36,8 +36,8 @@ contains "tcpg", it's used as-is.
 {{- printf "%s-pg-credential" (include "tcpg.fullname" .) -}}
 {{- end -}}
 
-{{- define "tcpg.loadSecretName" -}}
-{{- printf "%s-load-credential" (include "tcpg.fullname" .) -}}
+{{- define "tcpg.restoreSecretName" -}}
+{{- printf "%s-restore-credential" (include "tcpg.fullname" .) -}}
 {{- end -}}
 
 {{- define "tcpg.selectorLabels" -}}

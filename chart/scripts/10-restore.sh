@@ -3,7 +3,7 @@
 # directory when PGDATA is already populated.
 set -euo pipefail
 
-DUMP=/dump/dump
+DUMP=/restore/dump
 if [ ! -s "$DUMP" ]; then
   echo "No dump file at $DUMP; nothing to restore."
   exit 0

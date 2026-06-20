@@ -52,8 +52,9 @@ tests:
   - it: init container meets restricted PSS
     template: tcpg/postgres.yaml
     set:
-      tcpg.init.dumpBaseUrl: https://example.com
-      tcpg.init.dumpPath: /d.dump
+      tcpg.init.restore.enabled: true
+      tcpg.init.restore.baseUrl: https://example.com
+      tcpg.init.restore.path: /d.dump
     asserts:
       - equal:
           path: spec.template.spec.initContainers[0].securityContext.allowPrivilegeEscalation
@@ -84,26 +85,27 @@ tests:
           path: spec.template.spec.containers[0].envFrom[0].secretRef.name
           value: tcpg-pg-credential
 
-  - it: main container envFrom does not reference the load-credential secret (no DUMP_AUTH_VALUE leak)
+  - it: main container envFrom does not reference the restore-credential secret (no RESTORE_AUTH_VALUE leak)
     template: tcpg/postgres.yaml
     set:
-      tcpg.init.dumpBaseUrl: https://example.com
-      tcpg.init.dumpPath: /d.dump
-      tcpg.init.dumpAuth.type: basic
-      tcpg.init.dumpAuth.value: user:pw
+      tcpg.init.restore.enabled: true
+      tcpg.init.restore.baseUrl: https://example.com
+      tcpg.init.restore.path: /d.dump
+      tcpg.init.restore.auth.type: basic
+      tcpg.init.restore.auth.value: user:pw
     asserts:
       - notContains:
           path: spec.template.spec.containers[0].envFrom
           any: true
           content:
             secretRef:
-              name: tcpg-load-credential
+              name: tcpg-restore-credential
       - notContains:
           path: spec.template.spec.containers[0].env
           any: true
-          content: { name: DUMP_AUTH_VALUE }
+          content: { name: RESTORE_AUTH_VALUE }
 
-  - it: omits initContainer, command override, and restore mounts when no dumpPath
+  - it: omits initContainer, command override, and restore mounts when restore is disabled
     template: tcpg/postgres.yaml
     asserts:
       - isNull: { path: spec.template.spec.initContainers }
@@ -119,13 +121,33 @@ tests:
           path: spec.template.spec.volumes
           any: true
           content:
-            name: dump
+            name: restore
 
-  - it: adds curl initContainer with no-auth case when dumpAuth.type is none
+  - it: renders no restore artifacts when restore.enabled is false even with other fields set
     template: tcpg/postgres.yaml
     set:
-      tcpg.init.dumpBaseUrl: https://example.com
-      tcpg.init.dumpPath: /d.dump
+      tcpg.init.restore.enabled: false
+      tcpg.init.restore.baseUrl: https://example.com
+      tcpg.init.restore.path: /d.dump
+      tcpg.init.restore.auth.type: basic
+      tcpg.init.restore.auth.value: user:pw
+    asserts:
+      - isNull: { path: spec.template.spec.initContainers }
+      - isNull: { path: 'spec.template.spec.containers[0].command' }
+      - notContains:
+          path: spec.template.spec.volumes
+          any: true
+          content:
+            name: restore
+      - notExists:
+          path: 'spec.template.metadata.annotations["checksum/restore-script"]'
+
+  - it: adds curl initContainer with no-auth case when restore.auth.type is none
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.init.restore.enabled: true
+      tcpg.init.restore.baseUrl: https://example.com
+      tcpg.init.restore.path: /d.dump
     asserts:
       - equal:
           path: spec.template.spec.initContainers[0].name
@@ -135,169 +157,204 @@ tests:
           pattern: '^curlimages/curl:'
       - contains:
           path: spec.template.spec.initContainers[0].env
-          content: { name: DUMP_BASE_URL, value: https://example.com }
+          content: { name: RESTORE_BASE_URL, value: https://example.com }
       - contains:
           path: spec.template.spec.initContainers[0].env
-          content: { name: DUMP_PATH, value: /d.dump }
+          content: { name: RESTORE_PATH, value: /d.dump }
       - contains:
           path: spec.template.spec.initContainers[0].env
-          content: { name: DUMP_AUTH_TYPE, value: none }
+          content: { name: RESTORE_AUTH_TYPE, value: none }
       - contains:
           path: spec.template.spec.initContainers[0].env
-          content: { name: DUMP_INSECURE_SKIP_TLS_VERIFY, value: "false" }
+          content: { name: RESTORE_INSECURE_SKIP_TLS_VERIFY, value: "false" }
       - notContains:
           path: spec.template.spec.initContainers[0].env
           any: true
-          content: { name: DUMP_AUTH_VALUE }
+          content: { name: RESTORE_AUTH_VALUE }
       - matchRegex:
           path: spec.template.spec.initContainers[0].command[2]
-          pattern: 'case "\$DUMP_AUTH_TYPE"'
+          pattern: 'case "\$RESTORE_AUTH_TYPE"'
 
-  - it: sets DUMP_INSECURE_SKIP_TLS_VERIFY to true when configured
+  - it: sets RESTORE_INSECURE_SKIP_TLS_VERIFY to true when configured
     template: tcpg/postgres.yaml
     set:
-      tcpg.init.dumpBaseUrl: https://self-signed.example.com
-      tcpg.init.dumpPath: /d.dump
-      tcpg.init.dumpInsecureSkipTlsVerify: true
+      tcpg.init.restore.enabled: true
+      tcpg.init.restore.baseUrl: https://self-signed.example.com
+      tcpg.init.restore.path: /d.dump
+      tcpg.init.restore.insecureSkipTlsVerify: true
     asserts:
       - contains:
           path: spec.template.spec.initContainers[0].env
-          content: { name: DUMP_INSECURE_SKIP_TLS_VERIFY, value: "true" }
+          content: { name: RESTORE_INSECURE_SKIP_TLS_VERIFY, value: "true" }
 
-  - it: defaults DUMP_INSECURE_SKIP_TLS_VERIFY to false
+  - it: defaults RESTORE_INSECURE_SKIP_TLS_VERIFY to false
     template: tcpg/postgres.yaml
     set:
-      tcpg.init.dumpBaseUrl: https://example.com
-      tcpg.init.dumpPath: /d.dump
+      tcpg.init.restore.enabled: true
+      tcpg.init.restore.baseUrl: https://example.com
+      tcpg.init.restore.path: /d.dump
     asserts:
       - contains:
           path: spec.template.spec.initContainers[0].env
-          content: { name: DUMP_INSECURE_SKIP_TLS_VERIFY, value: "false" }
+          content: { name: RESTORE_INSECURE_SKIP_TLS_VERIFY, value: "false" }
 
-  - it: wires DUMP_AUTH_VALUE from chart-managed secret for basic auth
+  - it: wires RESTORE_AUTH_VALUE from chart-managed secret for basic auth
     template: tcpg/postgres.yaml
     set:
-      tcpg.init.dumpBaseUrl: https://example.com
-      tcpg.init.dumpPath: /d.dump
-      tcpg.init.dumpAuth.type: basic
-      tcpg.init.dumpAuth.value: user:pw
+      tcpg.init.restore.enabled: true
+      tcpg.init.restore.baseUrl: https://example.com
+      tcpg.init.restore.path: /d.dump
+      tcpg.init.restore.auth.type: basic
+      tcpg.init.restore.auth.value: user:pw
     asserts:
       - contains:
           path: spec.template.spec.initContainers[0].env
-          content: { name: DUMP_AUTH_TYPE, value: basic }
+          content: { name: RESTORE_AUTH_TYPE, value: basic }
       - contains:
           path: spec.template.spec.initContainers[0].env
           content:
-            name: DUMP_AUTH_VALUE
+            name: RESTORE_AUTH_VALUE
             valueFrom:
               secretKeyRef:
-                name: tcpg-load-credential
-                key: DUMP_AUTH_VALUE
+                name: tcpg-restore-credential
+                key: RESTORE_AUTH_VALUE
 
-  - it: wires DUMP_AUTH_VALUE from externally-managed secret when configured
+  - it: wires RESTORE_AUTH_VALUE from externally-managed secret when configured
     template: tcpg/postgres.yaml
     set:
-      tcpg.init.dumpBaseUrl: https://example.com
-      tcpg.init.dumpPath: /d.dump
-      tcpg.init.dumpAuth.type: bearer
-      tcpg.init.existingDumpAuthSecret.name: external-dump-auth
-      tcpg.init.existingDumpAuthSecret.key: my-token-key
+      tcpg.init.restore.enabled: true
+      tcpg.init.restore.baseUrl: https://example.com
+      tcpg.init.restore.path: /d.dump
+      tcpg.init.restore.auth.type: bearer
+      tcpg.init.restore.auth.existingSecret.name: external-restore-auth
+      tcpg.init.restore.auth.existingSecret.key: my-token-key
     asserts:
       - contains:
           path: spec.template.spec.initContainers[0].env
-          content: { name: DUMP_AUTH_TYPE, value: bearer }
+          content: { name: RESTORE_AUTH_TYPE, value: bearer }
       - contains:
           path: spec.template.spec.initContainers[0].env
           content:
-            name: DUMP_AUTH_VALUE
+            name: RESTORE_AUTH_VALUE
             valueFrom:
               secretKeyRef:
-                name: external-dump-auth
+                name: external-restore-auth
                 key: my-token-key
 
-  - it: fails when dumpAuth.type is invalid
+  - it: fails when restore.auth.type is invalid
     template: tcpg/postgres.yaml
     set:
-      tcpg.init.dumpBaseUrl: https://example.com
-      tcpg.init.dumpPath: /d.dump
-      tcpg.init.dumpAuth.type: oauth
+      tcpg.init.restore.enabled: true
+      tcpg.init.restore.baseUrl: https://example.com
+      tcpg.init.restore.path: /d.dump
+      tcpg.init.restore.auth.type: oauth
     asserts:
       - failedTemplate:
-          errorMessage: "tcpg.init.dumpAuth.type must be one of: none, basic, bearer"
+          errorMessage: "tcpg.init.restore.auth.type must be one of: none, basic, bearer"
 
   - it: fails when basic/bearer is set without a value source
     template: tcpg/postgres.yaml
     set:
-      tcpg.init.dumpBaseUrl: https://example.com
-      tcpg.init.dumpPath: /d.dump
-      tcpg.init.dumpAuth.type: basic
+      tcpg.init.restore.enabled: true
+      tcpg.init.restore.baseUrl: https://example.com
+      tcpg.init.restore.path: /d.dump
+      tcpg.init.restore.auth.type: basic
     asserts:
       - failedTemplate:
-          errorMessage: "tcpg.init.dumpAuth.type is basic/bearer but no value source is configured; provide tcpg.init.dumpAuth.value or tcpg.init.existingDumpAuthSecret.name"
+          errorMessage: "tcpg.init.restore.auth.type is basic/bearer but no value source is configured; provide tcpg.init.restore.auth.value or tcpg.init.restore.auth.existingSecret.name"
 
   - it: fails when both inline and external auth value sources are set
     template: tcpg/postgres.yaml
     set:
-      tcpg.init.dumpBaseUrl: https://example.com
-      tcpg.init.dumpPath: /d.dump
-      tcpg.init.dumpAuth.type: basic
-      tcpg.init.dumpAuth.value: user:pw
-      tcpg.init.existingDumpAuthSecret.name: external-dump-auth
+      tcpg.init.restore.enabled: true
+      tcpg.init.restore.baseUrl: https://example.com
+      tcpg.init.restore.path: /d.dump
+      tcpg.init.restore.auth.type: basic
+      tcpg.init.restore.auth.value: user:pw
+      tcpg.init.restore.auth.existingSecret.name: external-restore-auth
+      tcpg.init.restore.auth.existingSecret.key: RESTORE_AUTH_VALUE
     asserts:
       - failedTemplate:
-          errorMessage: "Set either tcpg.init.dumpAuth.value (inline) or tcpg.init.existingDumpAuthSecret.name (external), not both"
+          errorMessage: "Set either tcpg.init.restore.auth.value (inline) or tcpg.init.restore.auth.existingSecret.name (external), not both"
 
-  - it: fails when dumpPath is set but dumpBaseUrl is empty
+  - it: fails when existingSecret.name is set but existingSecret.key is empty
     template: tcpg/postgres.yaml
     set:
-      tcpg.init.dumpPath: /d.dump
+      tcpg.init.restore.enabled: true
+      tcpg.init.restore.baseUrl: https://example.com
+      tcpg.init.restore.path: /d.dump
+      tcpg.init.restore.auth.type: bearer
+      tcpg.init.restore.auth.existingSecret.name: external-restore-auth
     asserts:
       - failedTemplate:
-          errorMessage: "tcpg.init.dumpBaseUrl is required when tcpg.init.dumpPath is set"
+          errorMessage: "tcpg.init.restore.auth.existingSecret.key is required when existingSecret.name is set"
 
-  - it: fails when existingDumpAuthSecret.name is set but dumpAuth.type is none
+  - it: fails when restore.enabled but restore.path is empty
     template: tcpg/postgres.yaml
     set:
-      tcpg.init.dumpBaseUrl: https://example.com
-      tcpg.init.dumpPath: /d.dump
-      tcpg.init.existingDumpAuthSecret.name: external-dump-auth
+      tcpg.init.restore.enabled: true
+      tcpg.init.restore.baseUrl: https://example.com
     asserts:
       - failedTemplate:
-          errorMessage: "tcpg.init.existingDumpAuthSecret.name is set but tcpg.init.dumpAuth.type is 'none'; set type to basic/bearer or clear existingDumpAuthSecret.name"
+          errorMessage: "tcpg.init.restore.path is required when tcpg.init.restore.enabled is true"
 
-  - it: fails when dumpBaseUrl and dumpPath would produce a double slash
+  - it: fails when restore.enabled but restore.baseUrl is empty
     template: tcpg/postgres.yaml
     set:
-      tcpg.init.dumpBaseUrl: https://example.com/
-      tcpg.init.dumpPath: /d.dump
+      tcpg.init.restore.enabled: true
+      tcpg.init.restore.path: /d.dump
     asserts:
       - failedTemplate:
-          errorMessage: "tcpg.init.dumpBaseUrl ends with '/' and tcpg.init.dumpPath starts with '/' — would produce '//' in URL; remove one"
+          errorMessage: "tcpg.init.restore.baseUrl is required when tcpg.init.restore.enabled is true"
 
-  - it: fails when dumpBaseUrl and dumpPath have no slash between them
+  - it: fails when existingSecret.name is set but restore.auth.type is none
     template: tcpg/postgres.yaml
     set:
-      tcpg.init.dumpBaseUrl: https://example.com
-      tcpg.init.dumpPath: d.dump
+      tcpg.init.restore.enabled: true
+      tcpg.init.restore.baseUrl: https://example.com
+      tcpg.init.restore.path: /d.dump
+      tcpg.init.restore.auth.existingSecret.name: external-restore-auth
     asserts:
       - failedTemplate:
-          errorMessage: "tcpg.init.dumpBaseUrl and tcpg.init.dumpPath have no slash between them; add trailing '/' to dumpBaseUrl or leading '/' to dumpPath"
+          errorMessage: "tcpg.init.restore.auth.existingSecret.name is set but tcpg.init.restore.auth.type is 'none'; set type to basic/bearer or clear existingSecret.name"
 
-  - it: accepts trailing slash on dumpBaseUrl without leading slash on dumpPath
+  - it: fails when restore.baseUrl and restore.path would produce a double slash
     template: tcpg/postgres.yaml
     set:
-      tcpg.init.dumpBaseUrl: https://example.com/
-      tcpg.init.dumpPath: d.dump
+      tcpg.init.restore.enabled: true
+      tcpg.init.restore.baseUrl: https://example.com/
+      tcpg.init.restore.path: /d.dump
+    asserts:
+      - failedTemplate:
+          errorMessage: "tcpg.init.restore.baseUrl ends with '/' and tcpg.init.restore.path starts with '/' — would produce '//' in URL; remove one"
+
+  - it: fails when restore.baseUrl and restore.path have no slash between them
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.init.restore.enabled: true
+      tcpg.init.restore.baseUrl: https://example.com
+      tcpg.init.restore.path: d.dump
+    asserts:
+      - failedTemplate:
+          errorMessage: "tcpg.init.restore.baseUrl and tcpg.init.restore.path have no slash between them; add trailing '/' to restore.baseUrl or leading '/' to restore.path"
+
+  - it: accepts trailing slash on restore.baseUrl without leading slash on restore.path
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.init.restore.enabled: true
+      tcpg.init.restore.baseUrl: https://example.com/
+      tcpg.init.restore.path: d.dump
     asserts:
       - equal:
           path: spec.template.spec.initContainers[0].name
           value: download-dump
 
-  - it: overrides command to entrypoint wrapper when dumpPath is set
+  - it: overrides command to entrypoint wrapper when restore is enabled
     template: tcpg/postgres.yaml
     set:
-      tcpg.init.dumpBaseUrl: https://example.com
-      tcpg.init.dumpPath: /d.dump
+      tcpg.init.restore.enabled: true
+      tcpg.init.restore.baseUrl: https://example.com
+      tcpg.init.restore.path: /d.dump
     asserts:
       - equal:
           path: spec.template.spec.containers[0].command
@@ -309,21 +366,25 @@ tests:
           value:
             - postgres
 
-  - it: mounts dump, restore-script, and wrapper when dumpPath is set
+  - it: mounts restore, restore-script, and wrapper when restore is enabled
     template: tcpg/postgres.yaml
     set:
-      tcpg.init.dumpBaseUrl: https://example.com
-      tcpg.init.dumpPath: /d.dump
+      tcpg.init.restore.enabled: true
+      tcpg.init.restore.baseUrl: https://example.com
+      tcpg.init.restore.path: /d.dump
     asserts:
       - contains:
           path: spec.template.spec.containers[0].volumeMounts
-          content: { name: dump, mountPath: /dump }
+          content: { name: restore, mountPath: /restore }
       - contains:
           path: spec.template.spec.containers[0].volumeMounts
           content: { name: restore-script, mountPath: /docker-entrypoint-initdb.d, readOnly: true }
       - contains:
           path: spec.template.spec.containers[0].volumeMounts
           content: { name: entrypoint-wrapper, mountPath: /etc/postgres-wrapper, readOnly: true }
+      - contains:
+          path: spec.template.spec.initContainers[0].volumeMounts
+          content: { name: restore, mountPath: /restore }
 
   - it: uses PVC volume by default and emptyDir when persistence disabled
     template: tcpg/postgres.yaml
@@ -344,11 +405,12 @@ tests:
       - exists:
           path: 'spec.template.metadata.annotations["checksum/secret"]'
 
-  - it: includes restore-script checksum annotation only when dumpPath is set
+  - it: includes restore-script checksum annotation only when restore is enabled
     template: tcpg/postgres.yaml
     set:
-      tcpg.init.dumpBaseUrl: https://example.com
-      tcpg.init.dumpPath: /d.dump
+      tcpg.init.restore.enabled: true
+      tcpg.init.restore.baseUrl: https://example.com
+      tcpg.init.restore.path: /d.dump
     asserts:
       - exists:
           path: 'spec.template.metadata.annotations["checksum/restore-script"]'

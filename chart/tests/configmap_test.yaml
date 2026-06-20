@@ -4,14 +4,15 @@ templates:
 set:
   tcpg.enabled: true
 tests:
-  - it: emits no ConfigMap when dumpPath is empty
+  - it: emits no ConfigMap when restore is disabled
     asserts:
       - hasDocuments: { count: 0 }
 
-  - it: emits ConfigMap with restore script and entrypoint wrapper when dumpPath is set
+  - it: emits ConfigMap with restore script and entrypoint wrapper when restore is enabled
     set:
-      tcpg.init.dumpBaseUrl: https://example.com
-      tcpg.init.dumpPath: /d.dump
+      tcpg.init.restore.enabled: true
+      tcpg.init.restore.baseUrl: https://example.com
+      tcpg.init.restore.path: /d.dump
     asserts:
       - isKind: { of: ConfigMap }
       - exists: { path: 'data["10-restore.sh"]' }
@@ -19,8 +20,9 @@ tests:
 
   - it: restore script handles all three formats and writes the sentinel
     set:
-      tcpg.init.dumpBaseUrl: https://example.com
-      tcpg.init.dumpPath: /d.dump
+      tcpg.init.restore.enabled: true
+      tcpg.init.restore.baseUrl: https://example.com
+      tcpg.init.restore.path: /d.dump
     asserts:
       - matchRegex:
           path: 'data["10-restore.sh"]'
@@ -40,8 +42,9 @@ tests:
 
   - it: wrapper checks the sentinel and exits non-zero on missing
     set:
-      tcpg.init.dumpBaseUrl: https://example.com
-      tcpg.init.dumpPath: /d.dump
+      tcpg.init.restore.enabled: true
+      tcpg.init.restore.baseUrl: https://example.com
+      tcpg.init.restore.path: /d.dump
     asserts:
       - matchRegex:
           path: 'data["entrypoint-wrapper.sh"]'
