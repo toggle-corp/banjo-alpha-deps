@@ -104,9 +104,14 @@ This block is **first-init only**: the credentials seed the DB the first time it
 - `init.existingDumpAuthSecret.{name,key}` — alternative: reference a pre-existing Secret instead of setting `dumpAuth.value` inline. Mutually exclusive with inline; template validation fails hard if both are set.
 - `init.dumpInsecureSkipTlsVerify` (default `false`) — `curl -k` for the download. Use only for internal / self-signed hosts.
 
-#### Running under ArgoCD / GitOps
+#### Password persistence: plain Helm vs GitOps
 
-The generated DB password lives only in the `<release>-tcpg-pg-credential` Secret and is reused via a Helm `lookup`. But `lookup` is **blind** under `helm template` (which is how ArgoCD and Flux render the chart): it always returns empty. So if `init.password` is empty, a brand-new random password is generated on **every sync** and overwrites the Secret — which then no longer matches the password baked into the existing PVC, and Postgres auth fails.
+The generated DB password lives only in the `<release>-tcpg-pg-credential` Secret and is reused on subsequent renders via a Helm `lookup`. How that behaves depends on how you render the chart:
+
+- **Plain `helm install` / `helm upgrade` (against a live cluster): nothing to do.** `lookup` reads the existing Secret, so an empty `init.password` is generated once on first install and preserved on every upgrade. This is the default happy path.
+- **ArgoCD / Flux (`helm template`, no cluster read): `lookup` is blind** and always returns empty. So if `init.password` is empty, a brand-new random password is generated on **every sync** and overwrites the Secret — which then no longer matches the password baked into the existing PVC, and Postgres auth fails.
+
+The chart serves both unchanged; only GitOps needs one of the two hatches below (a plain-Helm user never has an ArgoCD `Application`, so the `ignoreDifferences` option simply doesn't apply to them).
 
 Two ways to make GitOps safe:
 
@@ -331,6 +336,8 @@ The parent chart owns MinIO's credentials. When `minio.enabled: true` it renders
 | `S3_REGION` | S3 region (`minioConfig.region`, default `us-east-1`). |
 | `S3_ACCESS_KEY_ID` | Access key id (`minioConfig.accessKeyId`, default `minio`). Not secret, not random. |
 | `S3_SECRET_ACCESS_KEY` | Secret key. Auto-generated (`randAlphaNum 32`) on first install and preserved across upgrades; set `minioConfig.secretAccessKey` to pin/rotate. |
+
+**GitOps caveat (same as the Postgres password — applies to `S3_SECRET_ACCESS_KEY`).** Preservation across renders relies on a Helm `lookup`, which works under plain `helm install`/`upgrade` but is **blind under `helm template`** (ArgoCD/Flux). So with an empty `minioConfig.secretAccessKey`, GitOps regenerates the secret key on **every sync**; since MinIO reads its root password back from this same Secret, both MinIO and every app using these creds break. Plain Helm needs nothing. Under GitOps, either set `minioConfig.secretAccessKey` explicitly, **or** have the Application ignore the `minio-s3-credential` Secret's `/data` (`ignoreDifferences` + sync option `RespectIgnoreDifferences=true`) — see [Running under ArgoCD / GitOps](#running-under-argocd--gitops) for the snippet.
 
 Wire it into your app with `envFrom` — the app gets all four keys as environment variables:
 
