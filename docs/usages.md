@@ -1,15 +1,15 @@
 # Using the chart
 
-A single-replica Postgres for alpha environments. Optional one-shot restore from a URL on first boot.
+Umbrella chart of alpha-environment dependencies for the tc cluster: Postgres (`tcpg`), MinIO, Garage, and Dragonfly. Every component is opt-in (`enabled: false` by default). `tcpg` is a single-replica Postgres with an optional one-shot restore from a URL on first boot.
 
-Chart source: `gitea.local.togglecorp.com/tc-infra/tcpg`.
+Chart source: `gitea.local.togglecorp.com/togglecorp/banjo-alpha-deps`.
 
 ## Quick start
 
 Create a `values.yaml` and install:
 
 ```bash
-helm install mydb oci://gitea.local.togglecorp.com/tc-infra/tcpg --version 0.0.1 -f values.yaml
+helm install mydb oci://gitea.local.togglecorp.com/togglecorp/banjo-alpha-deps --version 0.0.1 -f values.yaml
 ```
 
 Apps connect via the ClusterIP service: `tcpg.<namespace>.svc.cluster.local:5432` (fixed name — see [Connecting](#connecting)).
@@ -73,11 +73,11 @@ dragonfly:
 This chart is alpha / tc-cluster-only, and its `values.yaml` defaults are already tuned for it: modest resource requests, `local-path` storage, a nodeAffinity rule that avoids RAID nodes, fixed resource names, and a 100 MiB/50 MiB MinIO request-body cap. There is **no separate overlay to layer** — just supply your per-install values (credentials, dump source, MinIO hostname) directly:
 
 ```bash
-helm install mydb oci://gitea.local.togglecorp.com/tc-infra/tcpg --version 0.0.1 \
-  -f my-overlay.yaml
+helm install mydb oci://gitea.local.togglecorp.com/togglecorp/banjo-alpha-deps --version 0.0.1 \
+  -f values.yaml
 ```
 
-Where `my-overlay.yaml` provides per-install specifics (password, dump source, etc.). Note `dumpInsecureSkipTlsVerify` stays `false` in the defaults — set it per-install when your dump host uses an internal/self-signed cert:
+Where `values.yaml` provides per-install specifics (password, dump source, etc.). Note `dumpInsecureSkipTlsVerify` stays `false` in the defaults — set it per-install when your dump host uses an internal/self-signed cert:
 
 ```yaml
 tcpg:
@@ -92,54 +92,34 @@ tcpg:
       value: "dump-user:dump-password-here"
 ```
 
-## Example: full setup with dump restore
+## Example: dump restore overlay
 
-Below is a realistic values file (based on `chart/values.local.yaml`). It sets resources, restores from a dump on first boot, pins storage class, and avoids RAID nodes via affinity.
+A realistic per-install overlay that restores from a dump on first boot. Resources, `local-path` storage, and the RAID-avoiding affinity are already baked into the defaults, so an overlay only needs the per-install specifics (note everything is nested under `tcpg:` — this is an umbrella chart):
 
 ```yaml
-resources:
-  requests:
-    cpu: 0.1
-    memory: 1Gi
-  limits:
-    cpu: 2
-    memory: 1Gi
-
-init:
-  # Inline password (stored in the chart-managed Secret). Leave empty to
-  # auto-generate a 32-char random password, preserved across upgrades via lookup.
-  # NOTE: under GitOps (ArgoCD/Flux) an empty password drifts — set it explicitly
-  # or ignore the Secret data (see "Running under ArgoCD / GitOps" below).
-  password: "your-db-password-here"
-
-  # One-shot restore on first init. Effective URL = dumpBaseUrl + dumpPath.
-  # Skipped when PGDATA is already populated.
-  dumpBaseUrl: "https://dumps.example.internal:8080"
-  dumpPath: "/path/to/init-db.dump"
-
-  # Skip TLS verification for the dump host (internal self-signed cert).
-  dumpInsecureSkipTlsVerify: true
-
-  # Basic auth: value is "user:pass", passed to curl -u.
-  # For bearer, set type: bearer and value: <token>.
-  dumpAuth:
-    type: basic
-    value: "dump-user:dump-password-here"
-
-persistence:
+tcpg:
   enabled: true
-  storageClass: "local-path"
-  size: 1Gi
+  init:
+    # Inline password (stored in the chart-managed `tcpg-pg-credential` Secret).
+    # Leave empty to auto-generate a 32-char random password, preserved across
+    # upgrades via lookup. NOTE: under GitOps (ArgoCD/Flux) an empty password
+    # drifts — set it explicitly or ignore the Secret data (see
+    # "Password persistence: plain Helm vs GitOps" below).
+    password: "your-db-password-here"
 
-affinity:
-  nodeAffinity:
-    requiredDuringSchedulingIgnoredDuringExecution:
-      nodeSelectorTerms:
-        - matchExpressions:
-            - key: "node.kubernetes.io/disk-raid"
-              operator: NotIn
-              values:
-                - "true"
+    # One-shot restore on first init. Effective URL = dumpBaseUrl + dumpPath.
+    # Skipped when PGDATA is already populated.
+    dumpBaseUrl: "https://dumps.example.internal:8080"
+    dumpPath: "/path/to/init-db.dump"
+
+    # Skip TLS verification for the dump host (internal self-signed cert).
+    dumpInsecureSkipTlsVerify: true
+
+    # Basic auth: value is "user:pass", passed to curl -u.
+    # For bearer, set type: bearer and value: <token>.
+    dumpAuth:
+      type: basic
+      value: "dump-user:dump-password-here"
 ```
 
 ## Option reference
