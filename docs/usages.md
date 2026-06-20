@@ -337,7 +337,16 @@ The parent chart owns MinIO's credentials. When `minio.enabled: true` it renders
 | `S3_ACCESS_KEY_ID` | Access key id (`minioConfig.accessKeyId`, default `minio`). Not secret, not random. |
 | `S3_SECRET_ACCESS_KEY` | Secret key. Auto-generated (`randAlphaNum 32`) on first install and preserved across upgrades; set `minioConfig.secretAccessKey` to pin/rotate. |
 
-**GitOps caveat (same as the Postgres password — applies to `S3_SECRET_ACCESS_KEY`).** Preservation across renders relies on a Helm `lookup`, which works under plain `helm install`/`upgrade` but is **blind under `helm template`** (ArgoCD/Flux). So with an empty `minioConfig.secretAccessKey`, GitOps regenerates the secret key on **every sync**; since MinIO reads its root password back from this same Secret, both MinIO and every app using these creds break. Plain Helm needs nothing. Under GitOps, either set `minioConfig.secretAccessKey` explicitly, **or** have the Application ignore the `minio-s3-credential` Secret's `/data` (`ignoreDifferences` + sync option `RespectIgnoreDifferences=true`) — see [Running under ArgoCD / GitOps](#running-under-argocd--gitops) for the snippet.
+**GitOps caveat (applies to `S3_SECRET_ACCESS_KEY`).** Preservation across renders relies on a Helm `lookup`, which works under plain `helm install`/`upgrade` but is **blind under `helm template`** (ArgoCD/Flux). So with an empty `minioConfig.secretAccessKey`, GitOps regenerates the secret key on **every sync**; since MinIO reads its root password back from this same Secret, both MinIO and every app using these creds break. **Plain Helm needs nothing. Under GitOps, set `minioConfig.secretAccessKey` explicitly** (e.g. via SealedSecrets / External Secrets).
+
+> Unlike the Postgres password, do **not** reach for the ArgoCD `ignoreDifferences` hatch here. MinIO creds are rotatable (next item), and ignoring the Secret's `/data` would silently block rotation.
+
+**Rotating the S3 secret key.** MinIO re-reads its root credentials on every start, so this key is rotatable in place (the Postgres password is not — it's frozen into the PVC at first init):
+
+- **Plain Helm / no GitOps:** either set `minioConfig.secretAccessKey` to the new value and `helm upgrade`, or edit the `minio-s3-credential` Secret directly (the `lookup` preserves a hand-edited value on the next render).
+- **GitOps:** set `minioConfig.secretAccessKey` to the new value and sync. (A hand-edited Secret would be clobbered on the next sync, since `lookup` is blind — so under GitOps rotation must go through the value.)
+
+Either way, restart MinIO and any consuming app pods so they pick up the new key (`envFrom` does not refresh a running pod).
 
 Wire it into your app with `envFrom` — the app gets all four keys as environment variables:
 
