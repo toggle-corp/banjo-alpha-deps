@@ -157,18 +157,21 @@ The `tcpg-pg-credential` (and the MinIO `minio-s3-credential`) Secrets are **not
 How it works:
 
 - A `Job` at hook weight `0` (`helm.sh/hook: pre-install,pre-upgrade`) generates/writes the Secret before the StatefulSet rolls. ArgoCD auto-converts the Helm hook to a `PreSync` Job; Flux and plain Helm run it as a normal pre-install/pre-upgrade hook. The Job uses **only** `helm.sh/hook` (no `argocd.argoproj.io/hook` — adding an Argo hook would suppress the Helm-hook path and break plain Helm/Flux, since a Job spec is immutable).
-- The Job needs RBAC to manage the Secret. The chart **auto-creates** a `ServiceAccount` + `Role` + `RoleBinding` at hook weight `-5` (so they exist first). The Role can `create` secrets and `get/update/patch` only the named credential Secrets.
+- The Job needs RBAC to manage the Secret. The chart **auto-creates** a `ServiceAccount` + `Role` + `RoleBinding` so they exist before the Job. The Role can `create` secrets and `get/update/patch` only the named credential Secrets.
+- **Ordering — RBAC before Job.** Plain Helm and Flux order hooks by `helm.sh/hook-weight` (RBAC at `-5`, Job at `0`). ArgoCD **ignores** `helm.sh/hook-weight` and orders the converted `PreSync` resources by `argocd.argoproj.io/sync-wave` instead, so both annotations are set: the RBAC carries `sync-wave: "-5"` and the Jobs `sync-wave: "0"`. Keep both — they target different engines.
 - Render fails closed: the static fields (DB/user/host/port, S3 endpoint, etc.) are computed at render time and the existing `required`/`fail` validations still run, so misconfiguration is caught at `helm template` time.
 
 The DB password is **three-state** (see `init.password` above): an explicit value is written/overwritten; an empty value with an existing Secret is preserved untouched; an empty value with no Secret generates a random 32-char password once. Because the password is frozen into the PVC at first init, the generated charset is URL-safe and any user-supplied special-character password is URL-encoded into `POSTGRES_URI`.
 
-> **Preserve is a no-op.** Once the Secret exists and `init.password` is empty, the Job leaves it alone — so changing `init.database` / `init.username` / host / port after first init does **not** rewrite the Secret. To change them you must either set `init.password` explicitly (forces a rewrite of all six fields) or delete the Secret so the next sync regenerates it.
+> **Static fields are always re-applied; only the credential is preserved.** On every run the Job re-applies the static connection fields (DB / user / host / port / URI) from the current rendered values, preserving only the existing password when `init.password` is empty. Setting `init.password` explicitly rewrites **all** connection fields in the Secret (DB / USER / HOST / PORT / URI) from current values, not just the password — so ensure they still match the **PVC-frozen** database, since the password itself is frozen at first init and is never re-read.
+
+> **Teardown caveat.** The credential Secrets are created by `kubectl` from inside the hook Job, so they are **not** Helm- or Argo-managed objects. They are **not** removed by `helm uninstall` or an ArgoCD app delete. Reinstalling into the same namespace finds the leftover Secret and reuses its credential (the preserve branch). To fully reset, delete the Secret manually (`kubectl -n <ns> delete secret <name>`).
 
 **Pin the password** by setting `init.password` (only at first init or a deliberate reset — it must match the value already baked into the PVC).
 
 **Recovery if drift already happened** (e.g. from an older `lookup`-based chart): the live PVC still holds the *original* password. Set `init.password` to the value currently in the live Secret so the Job stops changing it. If the data is disposable or dump-restorable, you can instead delete the StatefulSet **and** its PVC so a fresh first-init bakes in the now-stable password.
 
-Override the bootstrap image with `secretBootstrap.image.{repository,tag,pullPolicy}` (default `registry.k8s.io/kubectl:v1.31.4`).
+Override the bootstrap image with `secretBootstrap.image.{repository,tag,pullPolicy}` (default `alpine/k8s:1.31.1` — it ships a shell plus `kubectl`, which the Job's container script needs).
 
 **Using an externally-managed Secret for dump auth.** Instead of inlining `restore.auth.value`, reference a pre-existing Secret — useful when the credential is managed by SealedSecrets, External Secrets Operator, Vault, etc.
 

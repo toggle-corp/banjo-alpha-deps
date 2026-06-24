@@ -364,8 +364,18 @@ minioConfig:
 # RoleBinding) the Jobs need.
 secretBootstrap:
   image:
-    repository: registry.k8s.io/kubectl
-    tag: "v1.31.4"   # pinned — verify a real existing tag before bumping
+    # alpine/k8s ships a shell (/bin/sh) + kubectl — the Job's container runs a
+    # shell script, so the old distroless registry.k8s.io/kubectl image (no
+    # /bin/sh) could not execute it.
+    repository: alpine/k8s
+    tag: "1.31.1"   # pinned — verify a real existing tag before bumping
     pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
   backoffLimit: 3
   activeDeadlineSeconds: 120
