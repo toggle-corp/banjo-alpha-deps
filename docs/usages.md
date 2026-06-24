@@ -25,12 +25,13 @@ Copy this block into your overlay, fill the `# REQUIRED` lines, and delete the c
 tcpg:
   enabled: true                 # REQUIRED to deploy Postgres at all
   init:
-    # REQUIRED under GitOps (ArgoCD/Flux): write-once / init-frozen — baked into
-    # the PVC at first init and never re-read. An empty value regenerates a new
-    # random password on every sync and breaks auth. Plain `helm upgrade` may
-    # leave this empty (a random 32-char password is generated once and kept).
+    # Bootstrapped into the tcpg-pg-credential Secret by a pre-install/pre-upgrade
+    # Helm-hook Job (same model under plain Helm and GitOps — no lookup). Empty →
+    # generated once and preserved; set → written/overwritten. Write-once /
+    # init-frozen: baked into the PVC at first init and never re-read, so set it
+    # only at first init or a deliberate reset (must match the PVC).
     # Consumed by: the app, via the `tcpg-pg-credential` Secret (POSTGRES_PASSWORD).
-    password: "CHANGE-ME-db-password"   # REQUIRED (GitOps) / optional (plain Helm)
+    password: "CHANGE-ME-db-password"   # optional — pin at first init
 
     # optional — one-shot restore on FIRST init only. Effective URL = restore.baseUrl + restore.path.
     restore:
@@ -50,12 +51,13 @@ minio:
                                 # (Alternatively set minioConfig.endpointUrl for an in-cluster endpoint.)
   defaultBuckets: ""           # optional, comma/space-separated, e.g. "uploads,backups"
 minioConfig:
-  # REQUIRED under GitOps: rotatable (MinIO re-reads it on restart). An empty
-  # value regenerates on every sync and breaks both MinIO and consumers. Plain
-  # Helm may leave this empty (random 32-char, preserved). Do NOT use ArgoCD
-  # ignoreDifferences here — it would block rotation.
+  # Bootstrapped into the minio-s3-credential Secret by a pre-install/pre-upgrade
+  # Helm-hook Job (same model under plain Helm and GitOps — no lookup). Empty →
+  # generated once and preserved; set to a value → written/overwritten (rotation).
+  # MinIO re-reads it on restart, so rotating is in-place: set the value, then
+  # restart MinIO + consuming app pods.
   # Consumed by: MinIO (root password) AND the app, via `minio-s3-credential` (S3_SECRET_ACCESS_KEY).
-  secretAccessKey: ""          # REQUIRED (GitOps) / optional (plain Helm)
+  secretAccessKey: ""          # optional — set to pin/rotate
   endpointUrl: ""             # optional — set instead of minio.ingress.hostname for in-cluster endpoints
 
 # === Garage / Dragonfly (optional extra components) ==========================
@@ -104,11 +106,11 @@ A realistic per-install overlay that restores from a dump on first boot. Resourc
 tcpg:
   enabled: true
   init:
-    # Inline password (stored in the chart-managed `tcpg-pg-credential` Secret).
-    # Leave empty to auto-generate a 32-char random password, preserved across
-    # upgrades via lookup. NOTE: under GitOps (ArgoCD/Flux) an empty password
-    # drifts — set it explicitly or ignore the Secret data (see
-    # "Password persistence: plain Helm vs GitOps" below).
+    # Password for the `tcpg-pg-credential` Secret, bootstrapped by a Helm-hook
+    # Job (same under plain Helm and GitOps). Leave empty to auto-generate a
+    # 32-char random password once (preserved thereafter); set it to pin the
+    # value at first init (see "Credential bootstrap: how the Secrets are
+    # created" below).
     password: "your-db-password-here"
 
     # One-shot restore on first init. Effective URL = restore.baseUrl + restore.path.
@@ -134,47 +136,39 @@ tcpg:
 
 This block is **first-init only**: the credentials seed the DB the first time it is initialized, and the dump/restore config runs only at that first init. Re-rendering it does not re-seed an existing database.
 
+- `tcpg.secretName` (default empty → `tcpg-pg-credential`) — override the name of the Postgres credential Secret. The bootstrap Job creates/manages a Secret by this name; the StatefulSet and your app consume it by the same name.
 - `init.database` (default `postgres`) — DB created by the entrypoint.
 - `init.username` (default `postgres`) — superuser created by the entrypoint.
-- `init.password` — if empty, a random 32-char password is generated on first install. It's preserved across upgrades via a `lookup` on the existing `tcpg-pg-credential` Secret, so setting it empty is safe for rotation-free operation under plain `helm upgrade`. **Under GitOps (ArgoCD/Flux) this is unsafe:** `lookup` returns nothing under `helm template`, so an empty password regenerates a new random value on every sync, which then drifts from the password already baked into the existing PVC and breaks authentication. Under GitOps, either set `init.password` explicitly or configure the Application to ignore the Secret's data — see [Running under ArgoCD / GitOps](#running-under-argocd--gitops).
+- `init.password` — bootstrapped into the `tcpg-pg-credential` Secret by a pre-install/pre-upgrade **Helm-hook Job** that runs against the live cluster (so it behaves identically under plain Helm and GitOps — no `lookup`). Three-state logic: **set** → the Job writes/overwrites the Secret with this password; **empty + Secret exists** → preserved untouched (no-op); **empty + Secret absent** → the Job generates a random 32-char password once. The password is frozen into the PVC at first init and never re-read afterwards, so set `init.password` explicitly **only** at first init or for a deliberate reset, and it must match the value baked into the PVC. See [Credential bootstrap: how the Secrets are created](#credential-bootstrap-how-the-secrets-are-created).
 - `init.restore.enabled` (default `false`) — the **sole on/off gate** for the restore feature. When `false`, nothing restore-related renders (no init container, no ConfigMap, no `tcpg-restore-credential` Secret), regardless of the other fields below.
 - `init.restore.baseUrl` + `init.restore.path` — both **required** when `restore.enabled` is `true`. Concatenated verbatim into the dump URL. Both are non-secret (plain env vars in the pod spec) — do **not** embed credentials in the URL.
 - `init.restore.auth.type` ∈ `none | basic | bearer`:
   - `none` — no auth header.
   - `basic` — `value` is `user:pass`, passed as `curl -u`.
   - `bearer` — `value` is the token, sent as `Authorization: Bearer <value>`.
-- `init.restore.auth.value` — the only secret. Stored in a dedicated chart-managed Secret named `tcpg-restore-credential` (separate from the main `tcpg-pg-credential` that Postgres reads — prevents the dump auth from leaking into the Postgres container env). This holds a **user-supplied** value, not a lookup-generated one, so the GitOps regeneration caveat below does **not** apply to it.
+- `init.restore.auth.value` — the only secret. Stored in a dedicated **chart-rendered** Secret named `tcpg-restore-credential` (separate from `tcpg-pg-credential` that Postgres reads — prevents the dump auth from leaking into the Postgres container env). Unlike `tcpg-pg-credential`, this is a plain user-supplied value rendered straight from values (no bootstrap Job, no generation), so it is GitOps-safe as-is.
 - `init.restore.auth.existingSecret.{name,key}` — alternative: reference a pre-existing Secret instead of setting `auth.value` inline. Mutually exclusive with inline (template validation fails hard if both are set). `key` has **no default** — set it explicitly; it is required whenever `existingSecret.name` is set.
 - `init.restore.insecureSkipTlsVerify` (default `false`) — `curl -k` for the download. Use only for internal / self-signed hosts.
 
-#### Password persistence: plain Helm vs GitOps
+#### Credential bootstrap: how the Secrets are created
 
-The generated DB password lives only in the `tcpg-pg-credential` Secret and is reused on subsequent renders via a Helm `lookup`. How that behaves depends on how you render the chart:
+The `tcpg-pg-credential` (and the MinIO `minio-s3-credential`) Secrets are **not** rendered by the chart templates. Instead a **pre-install / pre-upgrade Helm-hook `Job`** runs `kubectl` against the **live cluster** to create or update each Secret. This is one mechanism that behaves identically under plain `helm`, Flux `HelmRelease`, and ArgoCD — there is **no `lookup`** (which is blind under `helm template` / GitOps) and **no `ignoreDifferences` hatch** to configure.
 
-- **Plain `helm install` / `helm upgrade` (against a live cluster): nothing to do.** `lookup` reads the existing Secret, so an empty `init.password` is generated once on first install and preserved on every upgrade. This is the default happy path.
-- **ArgoCD / Flux (`helm template`, no cluster read): `lookup` is blind** and always returns empty. So if `init.password` is empty, a brand-new random password is generated on **every sync** and overwrites the Secret — which then no longer matches the password baked into the existing PVC, and Postgres auth fails.
+How it works:
 
-The chart serves both unchanged; only GitOps needs one of the two hatches below (a plain-Helm user never has an ArgoCD `Application`, so the `ignoreDifferences` option simply doesn't apply to them).
+- A `Job` at hook weight `0` (`helm.sh/hook: pre-install,pre-upgrade`) generates/writes the Secret before the StatefulSet rolls. ArgoCD auto-converts the Helm hook to a `PreSync` Job; Flux and plain Helm run it as a normal pre-install/pre-upgrade hook. The Job uses **only** `helm.sh/hook` (no `argocd.argoproj.io/hook` — adding an Argo hook would suppress the Helm-hook path and break plain Helm/Flux, since a Job spec is immutable).
+- The Job needs RBAC to manage the Secret. The chart **auto-creates** a `ServiceAccount` + `Role` + `RoleBinding` at hook weight `-5` (so they exist first). The Role can `create` secrets and `get/update/patch` only the named credential Secrets.
+- Render fails closed: the static fields (DB/user/host/port, S3 endpoint, etc.) are computed at render time and the existing `required`/`fail` validations still run, so misconfiguration is caught at `helm template` time.
 
-Two ways to make GitOps safe:
+The DB password is **three-state** (see `init.password` above): an explicit value is written/overwritten; an empty value with an existing Secret is preserved untouched; an empty value with no Secret generates a random 32-char password once. Because the password is frozen into the PVC at first init, the generated charset is URL-safe and any user-supplied special-character password is URL-encoded into `POSTGRES_URI`.
 
-1. **Set `init.password` explicitly** in your values/overlay. Simple and deterministic.
-2. **Let the chart generate it once, then never overwrite it.** Configure the ArgoCD `Application` to ignore the Secret's `/data` and respect that during sync, so the first-generated password is written once and left alone:
+> **Preserve is a no-op.** Once the Secret exists and `init.password` is empty, the Job leaves it alone — so changing `init.database` / `init.username` / host / port after first init does **not** rewrite the Secret. To change them you must either set `init.password` explicitly (forces a rewrite of all six fields) or delete the Secret so the next sync regenerates it.
 
-```yaml
-spec:
-  ignoreDifferences:
-    - group: ""
-      kind: Secret
-      name: tcpg-pg-credential
-      jsonPointers:
-        - /data
-  syncPolicy:
-    syncOptions:
-      - RespectIgnoreDifferences=true
-```
+**Pin the password** by setting `init.password` (only at first init or a deliberate reset — it must match the value already baked into the PVC).
 
-**Recovery if drift already happened.** The live PVC still holds the *original* password (it was baked in at first init). First stabilize the password — set `init.password` to the value currently in the live Secret (or apply the `ignoreDifferences` config above) so it stops changing. If the data is disposable or dump-restorable, you can then delete the StatefulSet **and** its PVC so a fresh first-init bakes in the now-stable password.
+**Recovery if drift already happened** (e.g. from an older `lookup`-based chart): the live PVC still holds the *original* password. Set `init.password` to the value currently in the live Secret so the Job stops changing it. If the data is disposable or dump-restorable, you can instead delete the StatefulSet **and** its PVC so a fresh first-init bakes in the now-stable password.
+
+Override the bootstrap image with `secretBootstrap.image.{repository,tag,pullPolicy}` (default `registry.k8s.io/kubectl:v1.31.4`).
 
 **Using an externally-managed Secret for dump auth.** Instead of inlining `restore.auth.value`, reference a pre-existing Secret — useful when the credential is managed by SealedSecrets, External Secrets Operator, Vault, etc.
 
@@ -373,25 +367,20 @@ S3 API DNS: `minio.<namespace>.svc.cluster.local:9000`. Console (UI) listens on 
 
 #### Generated S3 credentials
 
-The parent chart owns MinIO's credentials. When `minio.enabled: true` it renders a single Kubernetes Secret named **`minio-s3-credential`** (the value of `minio.auth.existingSecret`) with four keys:
+The parent chart owns MinIO's credentials. When `minio.enabled: true` a **pre-install/pre-upgrade Helm-hook Job** (`templates/minio/secret-bootstrap-job.yaml`) creates a single Kubernetes Secret named **`minio-s3-credential`** (the value of `minio.auth.existingSecret`) against the live cluster, with four keys:
 
 | Key | Description |
 | --- | --- |
 | `S3_ENDPOINT_URL` | S3 API URL — derived as `<endpointScheme>://<minio.ingress.hostname>`, or set verbatim via `minioConfig.endpointUrl`. |
 | `S3_REGION` | S3 region (`minioConfig.region`, default `us-east-1`). |
 | `S3_ACCESS_KEY_ID` | Access key id (`minioConfig.accessKeyId`, default `minio`). Not secret, not random. |
-| `S3_SECRET_ACCESS_KEY` | Secret key. Auto-generated (`randAlphaNum 32`) on first install and preserved across upgrades; set `minioConfig.secretAccessKey` to pin/rotate. |
+| `S3_SECRET_ACCESS_KEY` | Secret key. Empty `minioConfig.secretAccessKey` → generated once and preserved; set it to pin/rotate (the Job overwrites). |
 
-**GitOps caveat (applies to `S3_SECRET_ACCESS_KEY`).** Preservation across renders relies on a Helm `lookup`, which works under plain `helm install`/`upgrade` but is **blind under `helm template`** (ArgoCD/Flux). So with an empty `minioConfig.secretAccessKey`, GitOps regenerates the secret key on **every sync**; since MinIO reads its root password back from this same Secret, both MinIO and every app using these creds break. **Plain Helm needs nothing. Under GitOps, set `minioConfig.secretAccessKey` explicitly** (e.g. via SealedSecrets / External Secrets).
+The bootstrap Job runs the same way under plain `helm`, Flux `HelmRelease`, and ArgoCD (which converts the Helm hook to a `PreSync` Job) — there is **no `lookup`** and **no `ignoreDifferences` hatch** to configure. The chart auto-creates the RBAC the Job needs (see [Credential bootstrap: how the Secrets are created](#credential-bootstrap-how-the-secrets-are-created)). The `S3_SECRET_ACCESS_KEY` is three-state: explicit value → written/overwritten; empty + Secret exists → preserved; empty + Secret absent → generated once.
 
-> Unlike the Postgres password, do **not** reach for the ArgoCD `ignoreDifferences` hatch here. MinIO creds are rotatable (next item), and ignoring the Secret's `/data` would silently block rotation.
+**Rotating the S3 secret key.** MinIO re-reads its root credentials on every start, so this key is rotatable in place (the Postgres password is not — it's frozen into the PVC at first init). Set `minioConfig.secretAccessKey` to the new value and re-run (plain `helm upgrade`) or sync (GitOps); the Job overwrites the Secret with the new key. Do **not** edit the Secret by hand under GitOps — the next sync's Job would overwrite a hand-edited value only when an explicit `secretAccessKey` is set, so always rotate through the value.
 
-**Rotating the S3 secret key.** MinIO re-reads its root credentials on every start, so this key is rotatable in place (the Postgres password is not — it's frozen into the PVC at first init):
-
-- **Plain Helm / no GitOps:** either set `minioConfig.secretAccessKey` to the new value and `helm upgrade`, or edit the `minio-s3-credential` Secret directly (the `lookup` preserves a hand-edited value on the next render).
-- **GitOps:** set `minioConfig.secretAccessKey` to the new value and sync. (A hand-edited Secret would be clobbered on the next sync, since `lookup` is blind — so under GitOps rotation must go through the value.)
-
-Either way, restart MinIO and any consuming app pods so they pick up the new key (`envFrom` does not refresh a running pod).
+After rotating, restart MinIO and any consuming app pods so they pick up the new key (`envFrom` does not refresh a running pod).
 
 Wire it into your app with `envFrom` — the app gets all four keys as environment variables:
 
@@ -415,7 +404,7 @@ minioConfig:
 ```yaml
 minioConfig:
   accessKeyId: minio        # S3_ACCESS_KEY_ID and MinIO's root user
-  secretAccessKey: ""       # empty → random 32-char, preserved across upgrades
+  secretAccessKey: ""       # empty → generated once by the bootstrap Job; set to pin/rotate
   region: us-east-1         # S3_REGION
   endpointScheme: https     # scheme used when deriving the endpoint from ingress.hostname
   endpointUrl: ""           # explicit S3_ENDPOINT_URL; empty → derived from ingress.hostname

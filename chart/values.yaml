@@ -5,6 +5,12 @@ tcpg:
   # Fixed name → resources are `tcpg-*` instead of `<release>-tcpg-*`.
   fullnameOverride: "tcpg"
 
+  # Override the name of the Postgres credential Secret. Empty → computed default
+  # `<fullname>-pg-credential` (i.e. `tcpg-pg-credential` with the override above).
+  # The bootstrap Job (below) creates/manages a Secret by this name; the app and
+  # StatefulSet consume it by the same name.
+  secretName: ""
+
   image:
     repository: postgres
     tag: "18.1"
@@ -33,18 +39,16 @@ tcpg:
   init:
     database: postgres
     username: postgres
-    # Seeds the password ONLY at first init. Afterwards the live password lives
-    # in the <release>-tcpg-pg-credential Secret and is reused via a `lookup` on
-    # that Secret, so the value here is ignored once the DB exists.
-    #
-    # WARNING (GitOps): `lookup` returns nothing under `helm template` (and thus
-    # ArgoCD/Flux), so leaving this empty under GitOps regenerates a NEW random
-    # password on every sync, which then drifts from the password baked into the
-    # existing PVC and breaks auth. Under GitOps you MUST either set this
-    # explicitly, OR configure the ArgoCD Application to ignore the Secret's data
-    # (see docs/usages.md). Outside GitOps (plain `helm upgrade`), an empty value
-    # is fine: a random password is generated on first install and preserved
-    # across upgrades via the lookup.
+    # Seeds the password ONLY at first init. A pre-install/pre-upgrade Helm-hook
+    # Job (templates/tcpg/secret-bootstrap-job.yaml) bootstraps the
+    # tcpg-pg-credential Secret against the LIVE cluster — GitOps-safe, no
+    # `lookup`. Three-state logic at runtime:
+    #   - set here       → write/overwrite the Secret with this password
+    #   - empty + exists → preserve the existing Secret (no-op)
+    #   - empty + absent → generate a random 32-char password once
+    # The password is frozen into the PVC at first init and never re-read, so set
+    # this explicitly only at first init or for a deliberate reset (must match the
+    # PVC). The same value works identically under plain Helm and ArgoCD/Flux.
     password: ""
     # Optional one-shot restore on first init. The whole block is gated by
     # `restore.enabled` — when false, nothing restore-related renders (no init
@@ -327,8 +331,14 @@ minioConfig:
   # Fixed access key id (like a username — not secret, not random). Becomes
   # S3_ACCESS_KEY_ID and MinIO's root user.
   accessKeyId: minio
-  # Empty → randAlphaNum 32 generated on first install, preserved across upgrades
-  # via lookup. Set to rotate (requires manual minio + app pod restart).
+  # Bootstrapped by the pre-install/pre-upgrade Helm-hook Job
+  # (templates/minio/secret-bootstrap-job.yaml) against the LIVE cluster —
+  # GitOps-safe, no `lookup`. Three-state logic at runtime:
+  #   - set here       → write/overwrite the Secret with this key (rotation)
+  #   - empty + exists → preserve the existing Secret (no-op)
+  #   - empty + absent → generate a random 32-char key once
+  # MinIO re-reads this on restart, so it is rotatable: set the value and restart
+  # MinIO + consuming app pods. The same value works under plain Helm and GitOps.
   secretAccessKey: ""
   region: us-east-1
   endpointScheme: https
@@ -345,3 +355,17 @@ minioConfig:
   # bytes). Empty → omitted from the Middleware spec, so Traefik's 1 MiB default
   # applies. Only takes effect when maxRequestBodyBytes is set.
   memRequestBodyBytes: 52428800   # 50 MiB — held in memory before spilling to disk
+
+# Shared config for the credential-bootstrap Helm-hook Jobs. A pre-install /
+# pre-upgrade Job runs `kubectl` against the live cluster to create/manage the
+# tcpg-pg-credential and minio-s3-credential Secrets (one GitOps-safe mechanism
+# for plain Helm, Flux-HelmRelease, and ArgoCD — no `lookup`, no
+# ignoreDifferences). The chart auto-creates the RBAC (ServiceAccount + Role +
+# RoleBinding) the Jobs need.
+secretBootstrap:
+  image:
+    repository: registry.k8s.io/kubectl
+    tag: "v1.31.4"   # pinned — verify a real existing tag before bumping
+    pullPolicy: IfNotPresent
+  backoffLimit: 3
+  activeDeadlineSeconds: 120

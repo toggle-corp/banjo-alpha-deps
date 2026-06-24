@@ -33,7 +33,15 @@ contains "tcpg", it's used as-is.
 {{- end -}}
 
 {{- define "tcpg.pgSecretName" -}}
-{{- printf "%s-pg-credential" (include "tcpg.fullname" .) -}}
+{{- default (printf "%s-pg-credential" (include "tcpg.fullname" .)) .Values.tcpg.secretName -}}
+{{- end -}}
+
+{{/*
+ServiceAccount name for the shared secret-bootstrap hook (Jobs + RBAC). Neutral
+name — bootstraps both the tcpg and minio credential Secrets.
+*/}}
+{{- define "tcpg.secretBootstrap.serviceAccountName" -}}
+{{- printf "%s-secret-bootstrap" .Release.Name | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
 {{- define "tcpg.restoreSecretName" -}}
