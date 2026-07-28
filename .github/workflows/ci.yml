@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint (pre-commit)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Install helm-unittest plugin
+        # The local `helm-unittest` pre-commit hook shells out to this.
+        run: helm plugin install https://github.com/helm-unittest/helm-unittest.git
+
+      - name: Fetch chart dependencies
+        # `helm lint` resolves subcharts from Chart.lock; the .tgz files are gitignored.
+        run: helm dep build chart
+
+      - name: Run pre-commit
+        uses: pre-commit/action@v3.0.1
+
+  unittest:
+    name: Helm unit tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Install helm-unittest plugin
+        run: helm plugin install https://github.com/helm-unittest/helm-unittest.git
+
+      - name: Fetch chart dependencies
+        run: helm dep build chart
+
+      - name: helm lint
+        run: helm lint chart
+
+      - name: helm unittest
+        run: helm unittest chart
+
+  integration:
+    name: Integration tests (Docker)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run restore-pipeline integration suite
+        # Spins up real postgres containers to exercise plain SQL / gzipped SQL /
+        # pg_dump -Fc restores plus the corrupt-dump failure path. ~40s.
+        run: ./chart/tests/integration/run.sh

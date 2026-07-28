@@ -16,17 +16,17 @@ repos:
     hooks:
       - id: helm-lint
         name: helm lint
-        entry: helm lint .
+        entry: helm lint chart
         language: system
         pass_filenames: false
-        files: ^(Chart\.yaml|values\.yaml|templates/|tests/)
+        files: ^chart/(Chart\.(yaml|lock)|values\.yaml|templates/|scripts/|tests/)
 
       - id: helm-unittest
         name: helm unittest
-        entry: helm unittest .
+        entry: helm unittest chart
         language: system
         pass_filenames: false
-        files: ^(Chart\.yaml|values\.yaml|templates/|tests/)
+        files: ^chart/(Chart\.(yaml|lock)|values\.yaml|templates/|scripts/|tests/)
 
       - id: shellcheck
         name: shellcheck

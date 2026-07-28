@@ -6,16 +6,21 @@ Chart source: <https://github.com/toggle-corp/banjo-alpha-deps>.
 
 ## Quick start
 
-Clone the repo, create a `values.yaml`, and install from the local chart:
+Tagged releases are published to GHCR. Create a `values.yaml` and install:
+
+```bash
+helm install mydb oci://ghcr.io/toggle-corp/banjo-alpha-deps --version <X.Y.Z> -f values.yaml
+```
+
+Versions are listed at
+<https://github.com/toggle-corp/banjo-alpha-deps/pkgs/container/banjo-alpha-deps>;
+each also has a GitHub Release carrying the packaged `.tgz` for clusters that can't
+reach GHCR. To track `main` instead, install from a clone:
 
 ```bash
 git clone https://github.com/toggle-corp/banjo-alpha-deps.git
 helm install mydb ./banjo-alpha-deps/chart -f values.yaml
 ```
-
-> Togglecorp internal: the chart is also published to the internal OCI registry, so
-> `helm install mydb oci://<internal-registry>/togglecorp/banjo-alpha-deps --version 0.0.1 -f values.yaml`
-> works from inside the network.
 
 Apps connect via the ClusterIP service: `tcpg.<namespace>.svc.cluster.local:5432` (fixed name — see [Connecting](#connecting)).
 
@@ -464,6 +469,47 @@ The baked-in `chart/values.yaml` defaults already wire all of this with a 100 Mi
 `chart/values.yaml` works around this by overriding all four image repositories the chart can pull (`image`, `clientImage`, `console.image`, `defaultInitContainers.volumePermissions.image`) to their `bitnamilegacy/*` equivalents — a frozen free mirror of the pre-cutover images. Tags are inherited from the chart's own pinned defaults; the same tags exist on bitnamilegacy, so versions stay in lockstep with whatever Chart.yaml's pinned `version:` was published with.
 
 Trade-off: `bitnamilegacy/*` is frozen — no future security patches. Acceptable for alpha; **not** for production. For prod, either restore `image.repository: bitnami/<name>` (and the other three) and supply pull secrets for a Bitnami Secure Images subscription, or migrate off the Bitnami chart entirely (e.g. `minio/operator`).
+
+## Releasing
+
+Releases are cut locally with [`./release.sh`](../release.sh) and published by CI on
+tag push. Tooling comes from [fugit](https://github.com/toggle-corp/fugit), pinned as
+a submodule at `./fugit` (`branch = vX.Y.Z` in `.gitmodules` is the source of truth —
+bump it and run `bash fugit/scripts/sub-module-sync.sh`, never `git checkout` inside
+the submodule).
+
+Requires `git-cliff`, `semver`, `typos`, and an authenticated `gh` on `$PATH`.
+
+```bash
+./release.sh            # prompts for the version
+./release.sh v1.2.3     # pre-fills the prompt
+git push origin v1.2.3 && git push
+```
+
+`release.sh` regenerates `CHANGELOG.md` from the commit history via git-cliff, bumps
+`chart/Chart.yaml`'s `version:`, commits both, and creates a signed tag.
+
+**Tags are `v`-prefixed (`v1.2.3`); the chart version is not (`1.2.3`).** A helm
+`Chart.yaml` `version:` is strict SemVer and rejects the leading `v`, so
+`release_custom_hook` in `release.sh` strips it. The release workflow re-checks that
+`Chart.yaml` agrees with the tag and fails the build if a tag was cut by hand.
+
+Pushing the tag runs [`.github/workflows/release.yml`](../.github/workflows/release.yml), which:
+
+1. renders the changelog for that tag using `fugit/configs/cliff.toml`,
+2. packages the chart and pushes it to `oci://ghcr.io/toggle-corp` — landing at
+   `ghcr.io/toggle-corp/banjo-alpha-deps:<version>`,
+3. creates the GitHub Release with the changelog as its body and the `.tgz` attached.
+
+No registry secret is needed — the workflow authenticates to GHCR with the built-in
+`GITHUB_TOKEN`.
+
+### CI
+
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on every PR and push to
+`main`, in three parallel jobs: `pre-commit` (hygiene hooks + `helm lint` + `helm
+unittest`), a standalone `helm lint`/`helm unittest` job, and the Docker integration
+suite (`chart/tests/integration/run.sh`). Locally, `./prepush.sh` runs the same ground.
 
 ## Caveats
 
