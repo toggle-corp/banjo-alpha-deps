@@ -1,6 +1,6 @@
 # Using the chart
 
-Umbrella chart of alpha-environment dependencies for the tc cluster: Postgres (`tcpg`), MinIO, Garage, and Dragonfly. Every component is opt-in (`enabled: false` by default). `tcpg` is a single-replica Postgres with an optional one-shot restore from a URL on first boot.
+Umbrella chart of alpha-environment dependencies for the tc cluster: Postgres (`tcpg`), MinIO, and Dragonfly. Every component is opt-in (`enabled: false` by default). `tcpg` is a single-replica Postgres with an optional one-shot restore from a URL on first boot.
 
 Chart source: <https://github.com/toggle-corp/banjo-alpha-deps>.
 
@@ -65,9 +65,7 @@ minioConfig:
   secretAccessKey: ""          # optional — set to pin/rotate
   endpointUrl: ""             # optional — set instead of minio.ingress.hostname for in-cluster endpoints
 
-# === Garage / Dragonfly (optional extra components) ==========================
-garage:
-  enabled: false               # flip to true to deploy Garage (single-node S3)
+# === Dragonfly (optional extra component) ====================================
 dragonfly:
   enabled: false               # flip to true to deploy Dragonfly (Redis-compatible)
 ```
@@ -132,12 +130,6 @@ minio:
     app.togglecorp.com/stack: banjo
     app.togglecorp.com/tier: alpha
     app.togglecorp.com/instance: "3"
-
-garage:                      # garage's vendored chart DOES expose per-ingress labels
-  ingress:
-    s3:
-      api: { labels: { app.togglecorp.com/part-of: IFRC } }
-      web: { labels: { app.togglecorp.com/part-of: IFRC } }
 ```
 
 Label values must be legal Kubernetes label values (≤63 chars, alphanumeric first/last,
@@ -350,13 +342,12 @@ kubectl -n <namespace> get secret tcpg-pg-credential \
 
 ## Subcharts
 
-`banjo-alpha-deps` is an umbrella. tcpg is a DIY component rendered from `templates/tcpg/`. Garage and Dragonfly come in via Helm dependencies.
+`banjo-alpha-deps` is an umbrella. tcpg is a DIY component rendered from `templates/tcpg/`. MinIO and Dragonfly come in via Helm dependencies.
 
 | Component  | Source                                                  | Gate                 |
 |------------|---------------------------------------------------------|----------------------|
 | tcpg       | DIY (this chart, `templates/tcpg/`)                     | `tcpg.enabled`       |
 | dragonfly  | `oci://ghcr.io/dragonflydb/dragonfly/helm`, pinned in `Chart.yaml` | `dragonfly.enabled` |
-| garage     | vendored under `charts/garage/` (upstream not yet published a Helm chart) | `garage.enabled`    |
 | minio      | `oci://registry-1.docker.io/bitnamicharts/minio`, pinned in `Chart.yaml` | `minio.enabled`     |
 
 Dependencies are pulled with `helm dep update chart` (tarballs land in `chart/charts/*.tgz` and are `.gitignore`d — `Chart.lock` pins the versions).
@@ -375,27 +366,6 @@ dragonfly:
 ```
 
 Dragonfly Service DNS: `dragonfly.<namespace>.svc.cluster.local:6379`.
-
-### Enabling Garage
-
-Garage's upstream chart lives at `script/helm/garage/` inside the [Deuxfleurs/garage](https://git.deuxfleurs.fr/Deuxfleurs/garage) repo and is not published independently ([tracking issue](https://git.deuxfleurs.fr/Deuxfleurs/garage/issues/417)). We vendor it at `chart/charts/garage/` and pin the source commit in `chart/charts/garage/VENDORED_FROM.md`.
-
-To refresh to the latest `main-v2` HEAD, run:
-
-```bash
-./scripts/vendor-garage.sh
-```
-
-(Or `UPSTREAM_REF=<sha-or-tag> ./scripts/vendor-garage.sh` to pin to a specific ref.) Bump the version in `chart/Chart.yaml`'s `dependencies:` block to match `charts/garage/Chart.yaml`, then `helm dep update chart`.
-
-Minimal usage:
-
-```yaml
-garage:
-  enabled: true
-  # Any key under `garage:` is passed through to the vendored chart.
-  # See chart/charts/garage/values.yaml (and upstream README) for the full surface.
-```
 
 ### Enabling MinIO
 

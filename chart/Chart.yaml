@@ -1,6 +1,6 @@
 apiVersion: v2
 name: banjo-alpha-deps
-description: "Umbrella chart for alpha-environment dependencies (tcpg, garage, dragonfly, minio)."
+description: "Umbrella chart for alpha-environment dependencies (tcpg, dragonfly, minio)."
 type: application
 version: 0.0.1  # managed by release.sh
 sources:
@@ -10,9 +10,6 @@ dependencies:
     version: v1.38.0
     repository: oci://ghcr.io/dragonflydb/dragonfly/helm
     condition: dragonfly.enabled
-  - name: garage
-    version: 0.9.3  # tracks chart/charts/garage/Chart.yaml; bump via ./scripts/vendor-garage.sh
-    condition: garage.enabled
   - name: minio
     version: 17.0.21
     repository: oci://registry-1.docker.io/bitnamicharts

@@ -32,26 +32,15 @@ Helm chart: simple Postgres replacement for Bitnami chart.
 - [x] **Add support for annotations for argo/helm hooks** — `commonAnnotations` value applied to every resource's metadata (StatefulSet, Service, PVC, PDB, Secret, ConfigMap). Enables Argo sync-waves, Helm hooks, etc. Covered by `tests/common_annotations_test.yaml`.
 - [ ] Setup CI using woodpecker for running pre-push.sh checks
 - [x] Auto generate pg credentials secret for consumers. Renamed `<fullname>-credential` → `<fullname>-pg-credential`; added `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_URI` (URL-encoded) keys. Apps bind via `envFrom`. Helper renamed `tcpg.secretname` → `tcpg.pgSecretName`. Tests + docs updated.
-- [x] Multi-stack umbrella chart `banjo-alpha-deps`. tcpg stays DIY under `templates/tcpg/`; garage vendored from Deuxfleurs at `charts/garage/` (refresh via `./scripts/vendor-garage.sh`); dragonfly pulled from OCI `ghcr.io/dragonflydb/dragonfly/helm@v1.38.0`. All three gated via `<name>.enabled`. Resource names stay `<release>-tcpg-*` regardless of umbrella name. Tests rewritten to `tcpg.*` value paths.
+- [x] Multi-stack umbrella chart `banjo-alpha-deps`. tcpg stays DIY under `templates/tcpg/`; dragonfly pulled from OCI `ghcr.io/dragonflydb/dragonfly/helm@v1.38.0`; minio from the Bitnami OCI chart. All gated via `<name>.enabled`. Resource names stay `<release>-tcpg-*` regardless of umbrella name. Tests rewritten to `tcpg.*` value paths. (Garage was vendored here too, then dropped — MinIO covers the S3 role.)
 - [ ] Setup renovatebot for dependencies update tracking
 - [ ] **Verify Dragonfly OCI dep works under ArgoCD.** The chart is pulled from `oci://ghcr.io/dragonflydb/dragonfly/helm` and the `.tgz` is `.gitignore`d, so ArgoCD's repo-server has to run `helm dependency build` at sync time. Requires: (1) network egress from `argocd-repo-server` to `ghcr.io`, (2) OCI-enabled repo-server (default since v2.4). If the tc cluster blocks egress or strips OCI support, flip `charts/*.tgz` out of `.gitignore` and commit the tarball for fully-offline sync.
-- [ ] Setup bootstrapping for garagehq to support declarative config
-    ```
-    garagaBootstraper:
-      bukets:
-        - name: media
-        - name: static
-          acl: public  <-- default is private
-      credentialFromSecret:
-      credential:
-        access_key:
-        secret_key:
-    ```
-    - Define hook job (for both argocd and helm)
-        - auto create bucket
-        - auto create secrets
-            - Generate a secret from root chart and pass it to the garagahq chart
 - [x] Merge values/alpha.yaml -> values.yaml
+- [x] Drop Garage. The vendored `charts/garage/`, `scripts/vendor-garage.sh`, its
+      Chart.yaml dependency, values block, tests and docs are all removed. MinIO is
+      the S3 component. The unbuilt "declarative garage bootstrapper" idea (auto
+      bucket + credential creation via a hook Job) died with it — if we want the
+      equivalent for MinIO, open it as a fresh item.
 
 ## Review follow-ups (2026-04-22)
 

@@ -2,11 +2,8 @@ dependencies:
 - name: dragonfly
   repository: oci://ghcr.io/dragonflydb/dragonfly/helm
   version: v1.38.0
-- name: garage
-  repository: ""
-  version: 0.9.3
 - name: minio
   repository: oci://registry-1.docker.io/bitnamicharts
   version: 17.0.21
-digest: sha256:9b541aa3cfd50229396b10e18fd223ef7ff8422f5009c62b1e55acd62412163a
-generated: "2026-04-26T11:45:39.258496+05:45"
+digest: sha256:0e4e3b4b0ac4c34fc6600afed523df8ebf7a098d4c7f4054330565829bf9fd5a
+generated: "2026-07-28T22:48:41.973961738+05:45"

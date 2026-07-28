@@ -139,71 +139,9 @@ tcpg:
 
   # Annotations applied to every tcpg resource's metadata. Useful for Argo CD
   # sync-waves (argocd.argoproj.io/sync-wave) or Helm hooks (helm.sh/hook).
-  # Does NOT propagate to garage/dragonfly subcharts — use their own annotation
-  # values if those charts support them.
+  # Does NOT propagate to the dragonfly/minio subcharts — use their own
+  # annotation values if those charts support them.
   commonAnnotations: {}
-
-# Garage (S3-compatible object store). Vendored under charts/garage/ from
-# git.deuxfleurs.fr/Deuxfleurs/garage (upstream has not yet published a
-# standalone chart). Refresh with ./scripts/vendor-garage.sh.
-# Full upstream values: see chart/charts/garage/values.yaml.
-#
-# Garage runs in single-node mode for alpha. Two knobs must agree:
-#   - deployment.replicaCount  → pod count
-#   - garage.replicationFactor → copies of data garage keeps per object
-# If replicationFactor > replicaCount, writes fail with "not enough nodes".
-# (The nested `garage.garage.*` key is not a typo — the outer `garage:` is the
-# subchart gate; the inner one maps to Garage's own garage.toml settings.)
-garage:
-  enabled: false
-  # Stable name → resources are `garage-*` instead of `<release>-garage-*`.
-  fullnameOverride: "garage"
-  ingress:
-    s3:
-      api:
-        enabled: true
-        # TODO(traefik): Garage stays on nginx for now. Its vendored chart
-        # renders ingress annotations with toYaml (not tpl) and must not be
-        # hand-edited, so the Traefik middleware-reference namespace can't be
-        # resolved cleanly. Resolve before migrating Garage to Traefik.
-        className: "nginx"
-        # Deployment-metadata standard (app.togglecorp.com/*) — see minio.commonLabels
-        # above. The deploy layer stamps the rest; `component: resources` is ours.
-        # Garage's vendored chart DOES expose per-ingress labels, so use them.
-        labels:
-          app.togglecorp.com/component: resources
-      web:
-        labels:
-          app.togglecorp.com/component: resources
-  deployment:
-    replicaCount: 1
-  garage:
-    replicationFactor: "1"
-  resources:
-    requests:
-      cpu: 0.1
-      memory: 512Mi
-    limits:
-      cpu: 2
-      memory: 1Gi
-  persistence:
-    enabled: true
-    meta:
-      storageClass: "local-path"
-      size: 100Mi  # NOTE: ignored by local-path (node disk is the real limit)
-    data:
-      storageClass: "local-path"
-      size: 100Mi  # NOTE: ignored by local-path (node disk is the real limit)
-  affinity:
-    nodeAffinity:
-      # Keep alpha workloads off RAID nodes — RAID is reserved for prod.
-      requiredDuringSchedulingIgnoredDuringExecution:
-        nodeSelectorTerms:
-        - matchExpressions:
-          - key: "node.kubernetes.io/disk-raid"
-            operator: NotIn
-            values:
-              - "true"
 
 # Dragonfly (Redis-compatible in-memory store). Pulled from the official OCI
 # chart at ghcr.io/dragonflydb/dragonfly/helm (version pinned in Chart.yaml).

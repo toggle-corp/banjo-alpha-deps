@@ -8,7 +8,6 @@ suite: deployment-metadata standard (app.togglecorp.com/*)
 # See argo-templates/docs/annotations.md for the full standard.
 templates:
   - charts/minio/templates/**.yaml
-  - charts/garage/templates/**.yaml
 tests:
   - it: labels the minio S3 ingress component=resources by default (chart-side)
     set:
@@ -78,15 +77,3 @@ tests:
       - notExists:
           path: spec.selector.matchLabels["app.togglecorp.com/part-of"]
         template: charts/minio/templates/application.yaml
-
-  - it: labels the garage S3 ingresses component=resources by default (chart-side)
-    set:
-      garage.enabled: true
-      garage.ingress.s3.api.enabled: true
-      garage.ingress.s3.api.hostname: s3.example.com
-    asserts:
-      - equal:
-          path: metadata.labels["app.togglecorp.com/component"]
-          value: resources
-        documentIndex: 0
-        template: charts/garage/templates/ingress.yaml
