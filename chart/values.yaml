@@ -167,6 +167,14 @@ garage:
         # hand-edited, so the Traefik middleware-reference namespace can't be
         # resolved cleanly. Resolve before migrating Garage to Traefik.
         className: "nginx"
+        # Deployment-metadata standard (app.togglecorp.com/*) — see minio.commonLabels
+        # above. The deploy layer stamps the rest; `component: resources` is ours.
+        # Garage's vendored chart DOES expose per-ingress labels, so use them.
+        labels:
+          app.togglecorp.com/component: resources
+      web:
+        labels:
+          app.togglecorp.com/component: resources
   deployment:
     replicaCount: 1
   garage:
@@ -256,6 +264,18 @@ minio:
   enabled: false
   # Stable name → API DNS: `minio.<namespace>.svc.cluster.local:9000`.
   fullnameOverride: "minio"
+  # Deployment-metadata standard (app.togglecorp.com/*): the deploy layer (argo-templates'
+  # banjo-x) stamps part-of/name/stack/tier/instance here; `component: resources` is OURS
+  # because only this chart knows these ingresses serve a dependency, not the app. Helm
+  # deep-merges the two maps.
+  #
+  # Why commonLabels and not ingress.labels: the bitnami minio subchart exposes no
+  # per-ingress labels value, so this is the only hook. It lands on ALL minio resources,
+  # which is selector-SAFE: bitnami's `common.labels.matchLabels` picks only
+  # app.kubernetes.io/{name,instance} out of customLabels, so arbitrary labels never
+  # reach an immutable matchLabels selector.
+  commonLabels:
+    app.togglecorp.com/component: resources
   auth:
     # The parent chart generates this secret (see templates/minio/secret.yaml) and
     # MinIO reads its root creds back from it. Single source of truth: the secret
@@ -289,6 +309,10 @@ minio:
       # `{{ .Release.Namespace }}` token below is left LITERAL on purpose — the
       # MinIO subchart resolves it via tpl at render time.
       traefik.ingress.kubernetes.io/router.middlewares: '{{ .Release.Namespace }}-minio-body-limit@kubernetescrd'
+      # Deep health endpoint for external uptime monitoring (NOT a k8s probe path).
+      # Chart-fixed: MinIO's liveness path is a property of MinIO, not of the install,
+      # so no overlay should have to know it.
+      app.togglecorp.com/health-check: /minio/health/live
   # Your per-install overlay MUST set `minio.ingress.hostname` to the real S3 API
   # host. The parent chart derives S3_ENDPOINT_URL from it (see
   # templates/minio/secret.yaml); rendering fails closed if it's left empty (or

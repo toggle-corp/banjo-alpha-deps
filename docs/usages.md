@@ -98,6 +98,47 @@ tcpg:
         value: "dump-user:dump-password-here"
 ```
 
+## Deployment-metadata labels (`app.togglecorp.com/*`)
+
+The ingresses this chart renders carry the shared **deployment-metadata standard**, so
+downstream tooling (the dashboard, uptime monitoring, `kubectl -l …`) can tell what a
+deployment is without a hardcoded mapping table. The canonical spec lives in
+[argo-templates `docs/annotations.md`](https://gitea.local.togglecorp.com/togglecorp/argo-templates/src/branch/main/docs/annotations.md).
+
+Responsibilities are split, and Helm deep-merges the two halves:
+
+| Field | Who sets it |
+| --- | --- |
+| `part-of`, `name`, `stack`, `tier`, `instance` | the **deploy layer** (argo-templates' `banjo-x`), per install |
+| `component: resources` | **this chart** — only it knows these ingresses serve a dependency, not the app |
+| `health-check: /minio/health/live` | **this chart** — MinIO's liveness path is a property of MinIO |
+
+A parent Helm chart cannot push values into a subchart, so the deploy layer writes the
+subchart paths directly. If you install this chart by hand and want the taxonomy, supply:
+
+```yaml
+minio:
+  # No per-ingress `labels` value exists in the bitnami minio subchart, so the taxonomy
+  # goes here. Selector-safe: bitnami's common.labels.matchLabels picks only
+  # app.kubernetes.io/{name,instance} out of customLabels, so custom labels can never
+  # reach an immutable matchLabels selector.
+  commonLabels:
+    app.togglecorp.com/part-of: IFRC
+    app.togglecorp.com/name: GO
+    app.togglecorp.com/stack: banjo
+    app.togglecorp.com/tier: alpha
+    app.togglecorp.com/instance: "3"
+
+garage:                      # garage's vendored chart DOES expose per-ingress labels
+  ingress:
+    s3:
+      api: { labels: { app.togglecorp.com/part-of: IFRC } }
+      web: { labels: { app.togglecorp.com/part-of: IFRC } }
+```
+
+Label values must be legal Kubernetes label values (≤63 chars, alphanumeric first/last,
+only `A-Za-z0-9._-` between). Mixed case is fine and expected — these are display-ready.
+
 ## Example: dump restore overlay
 
 A realistic per-install overlay that restores from a dump on first boot. Resources, `local-path` storage, and the RAID-avoiding affinity are already baked into the defaults, so an overlay only needs the per-install specifics (note everything is nested under `tcpg:` — this is an umbrella chart):

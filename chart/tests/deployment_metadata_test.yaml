@@ -1,0 +1,92 @@
+suite: deployment-metadata standard (app.togglecorp.com/*)
+# The deploy layer (argo-templates' banjo-x) stamps the taxonomy for the DEPS
+# ingresses straight onto these subchart paths, because a parent chart cannot push
+# values into a subchart. This chart contributes the two things only it knows:
+# `component: resources` and MinIO's fixed deep health-check path. Helm deep-merges
+# the two maps — these tests pin that contract from both sides.
+#
+# See argo-templates/docs/annotations.md for the full standard.
+templates:
+  - charts/minio/templates/**.yaml
+  - charts/garage/templates/**.yaml
+tests:
+  - it: labels the minio S3 ingress component=resources by default (chart-side)
+    set:
+      minio.enabled: true
+      minio.auth.rootPassword: "unit-test-pw"
+      minio.ingress.hostname: s3.example.com
+    asserts:
+      - equal:
+          path: metadata.labels["app.togglecorp.com/component"]
+          value: resources
+        template: charts/minio/templates/ingress.yaml
+
+  - it: annotates the minio S3 ingress with the fixed deep health-check path
+    set:
+      minio.enabled: true
+      minio.auth.rootPassword: "unit-test-pw"
+      minio.ingress.hostname: s3.example.com
+    asserts:
+      # NOT a k8s probe path — this is for external uptime monitoring.
+      - equal:
+          path: metadata.annotations["app.togglecorp.com/health-check"]
+          value: /minio/health/live
+        template: charts/minio/templates/ingress.yaml
+      # the pre-existing body-limit middleware annotation must survive alongside it
+      - matchRegex:
+          path: metadata.annotations["traefik.ingress.kubernetes.io/router.middlewares"]
+          pattern: minio-body-limit@kubernetescrd$
+        template: charts/minio/templates/ingress.yaml
+
+  - it: deep-merges the deploy layer's taxonomy with the chart's component label
+    set:
+      minio.enabled: true
+      minio.auth.rootPassword: "unit-test-pw"
+      minio.ingress.hostname: s3.example.com
+      # exactly what banjo-x writes into banjoDependency.valuesObject
+      minio.commonLabels:
+        app.togglecorp.com/part-of: Mapswipe
+        app.togglecorp.com/name: Backend
+        app.togglecorp.com/stack: banjo
+        app.togglecorp.com/tier: alpha
+        app.togglecorp.com/instance: "1"
+    asserts:
+      - equal:
+          path: metadata.labels["app.togglecorp.com/part-of"]
+          value: Mapswipe
+        template: charts/minio/templates/ingress.yaml
+      - equal:
+          path: metadata.labels["app.togglecorp.com/instance"]
+          value: "1"
+        template: charts/minio/templates/ingress.yaml
+      - equal:                       # the chart's own default survives the merge
+          path: metadata.labels["app.togglecorp.com/component"]
+          value: resources
+        template: charts/minio/templates/ingress.yaml
+
+  - it: keeps commonLabels out of the minio selector (immutable matchLabels)
+    # Bitnami's common.labels.matchLabels picks only app.kubernetes.io/{name,instance}
+    # out of customLabels, so stamping arbitrary labels can never rewrite a selector
+    # on an existing workload. This is why commonLabels is a safe hook at all.
+    set:
+      minio.enabled: true
+      minio.mode: standalone
+      minio.auth.rootPassword: "unit-test-pw"
+      minio.commonLabels:
+        app.togglecorp.com/part-of: Mapswipe
+    asserts:
+      - notExists:
+          path: spec.selector.matchLabels["app.togglecorp.com/part-of"]
+        template: charts/minio/templates/application.yaml
+
+  - it: labels the garage S3 ingresses component=resources by default (chart-side)
+    set:
+      garage.enabled: true
+      garage.ingress.s3.api.enabled: true
+      garage.ingress.s3.api.hostname: s3.example.com
+    asserts:
+      - equal:
+          path: metadata.labels["app.togglecorp.com/component"]
+          value: resources
+        documentIndex: 0
+        template: charts/garage/templates/ingress.yaml
