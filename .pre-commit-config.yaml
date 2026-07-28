@@ -19,14 +19,14 @@ repos:
         entry: helm lint chart
         language: system
         pass_filenames: false
-        files: ^chart/(Chart\.(yaml|lock)|values\.yaml|templates/|scripts/|tests/)
+        files: ^chart/(Chart\.(yaml|lock)|values\.yaml|templates/|scripts/|tests/|charts/garage/)
 
       - id: helm-unittest
         name: helm unittest
         entry: helm unittest chart
         language: system
         pass_filenames: false
-        files: ^chart/(Chart\.(yaml|lock)|values\.yaml|templates/|scripts/|tests/)
+        files: ^chart/(Chart\.(yaml|lock)|values\.yaml|templates/|scripts/|tests/|charts/garage/)
 
       - id: shellcheck
         name: shellcheck
