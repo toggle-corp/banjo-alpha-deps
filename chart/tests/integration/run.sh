@@ -13,9 +13,17 @@ TMPDIR="$(mktemp -d -t tcpg-integration-XXXXXX)"
 
 CONTAINERS=()
 cleanup() {
+  set +e
   for c in "${CONTAINERS[@]:-}"; do
     docker rm -fv "$c" >/dev/null 2>&1 || true
   done
+  if [ -d "$TMPDIR" ] && docker image inspect "$PG_IMAGE" >/dev/null 2>&1; then
+    docker run --rm --user 0:0 \
+      -v "$TMPDIR:/work" \
+      --entrypoint /bin/sh \
+      "$PG_IMAGE" \
+      -c 'chmod -R a+rwX /work' >/dev/null 2>&1 || true
+  fi
   rm -rf "$TMPDIR"
 }
 trap cleanup EXIT
@@ -100,6 +108,7 @@ run_format_test() {
   local pgdata="$TMPDIR/pgdata-$label"
   local dump_dir="$TMPDIR/dump-$label"
   mkdir -p "$pgdata" "$dump_dir"
+  chmod 0777 "$dump_dir"
   cp "$src_dump" "$dump_dir/dump"
 
   echo "==> [$label] starting postgres..."
@@ -129,6 +138,7 @@ echo "==> [failure] starting postgres with broken dump..."
 fail_pgdata="$TMPDIR/pgdata-fail"
 fail_dump_dir="$TMPDIR/dump-fail"
 mkdir -p "$fail_pgdata" "$fail_dump_dir"
+chmod 0777 "$fail_dump_dir"
 echo "THIS IS NOT VALID SQL @@@@@@" > "$fail_dump_dir/dump"
 
 set +e
