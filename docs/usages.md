@@ -2,15 +2,20 @@
 
 Umbrella chart of alpha-environment dependencies for the tc cluster: Postgres (`tcpg`), MinIO, Garage, and Dragonfly. Every component is opt-in (`enabled: false` by default). `tcpg` is a single-replica Postgres with an optional one-shot restore from a URL on first boot.
 
-Chart source: `gitea.local.togglecorp.com/togglecorp/banjo-alpha-deps`.
+Chart source: <https://github.com/toggle-corp/banjo-alpha-deps>.
 
 ## Quick start
 
-Create a `values.yaml` and install:
+Clone the repo, create a `values.yaml`, and install from the local chart:
 
 ```bash
-helm install mydb oci://gitea.local.togglecorp.com/togglecorp/banjo-alpha-deps --version 0.0.1 -f values.yaml
+git clone https://github.com/toggle-corp/banjo-alpha-deps.git
+helm install mydb ./banjo-alpha-deps/chart -f values.yaml
 ```
+
+> Togglecorp internal: the chart is also published to the internal OCI registry, so
+> `helm install mydb oci://<internal-registry>/togglecorp/banjo-alpha-deps --version 0.0.1 -f values.yaml`
+> works from inside the network.
 
 Apps connect via the ClusterIP service: `tcpg.<namespace>.svc.cluster.local:5432` (fixed name — see [Connecting](#connecting)).
 
@@ -77,8 +82,7 @@ dragonfly:
 This chart is alpha / tc-cluster-only, and its `values.yaml` defaults are already tuned for it: modest resource requests, `local-path` storage, a nodeAffinity rule that avoids RAID nodes, fixed resource names, and a 100 MiB/50 MiB MinIO request-body cap. There is **no separate overlay to layer** — just supply your per-install values (credentials, dump source, MinIO hostname) directly:
 
 ```bash
-helm install mydb oci://gitea.local.togglecorp.com/togglecorp/banjo-alpha-deps --version 0.0.1 \
-  -f values.yaml
+helm install mydb ./chart -f values.yaml
 ```
 
 Where `values.yaml` provides per-install specifics (password, dump source, etc.). Note `restore.insecureSkipTlsVerify` stays `false` in the defaults — set it per-install when your dump host uses an internal/self-signed cert:
@@ -103,7 +107,7 @@ tcpg:
 The ingresses this chart renders carry the shared **deployment-metadata standard**, so
 downstream tooling (the dashboard, uptime monitoring, `kubectl -l …`) can tell what a
 deployment is without a hardcoded mapping table. The canonical spec lives in
-[argo-templates `docs/annotations.md`](https://gitea.local.togglecorp.com/togglecorp/argo-templates/src/branch/main/docs/annotations.md).
+`docs/annotations.md` of Togglecorp's internal `argo-templates` repo.
 
 Responsibilities are split, and Helm deep-merges the two halves:
 
