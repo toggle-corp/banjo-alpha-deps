@@ -66,9 +66,9 @@ k() { kubectl -n "$NS" "$@"; }
 # Query Postgres over the unix socket inside the pod (local connections trust).
 psql_q() { k exec tcpg-0 -c pg -- psql -U postgres -d postgres -tAc "$1"; }
 
+READY_TIMEOUT=180
 wait_ready() {
-  local timeout="${1:-180}"
-  k wait --for=condition=ready pod/tcpg-0 --timeout="${timeout}s" >/dev/null
+  k wait --for=condition=ready pod/tcpg-0 --timeout="${READY_TIMEOUT}s" >/dev/null
 }
 
 # ---------------------------------------------------------------------------
@@ -169,7 +169,9 @@ pass observability "pg_stat_statements preloaded and usable"
 # Phase 3 — /dev/shm is real, sized and enforced
 # ---------------------------------------------------------------------------
 shm_mb=$(k exec tcpg-0 -c pg -- sh -c "df -m /dev/shm | awk 'NR==2{print \$2}'" | tr -d ' \r')
-[ "$shm_mb" -ge 120 ] && [ "$shm_mb" -le 136 ] || die shm "expected ~128Mi /dev/shm, got ${shm_mb}Mi"
+if [ "$shm_mb" -lt 120 ] || [ "$shm_mb" -gt 136 ]; then
+  die shm "expected ~128Mi /dev/shm, got ${shm_mb}Mi"
+fi
 pass shm "/dev/shm is ${shm_mb}Mi, not the 64Mi Kubernetes default"
 
 # sizeLimit must be *enforced*: the memory budget subtracts shm.size on the
