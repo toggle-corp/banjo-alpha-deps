@@ -268,7 +268,7 @@ Inline (`restore.auth.value`) and external (`restore.auth.existingSecret.name`) 
 
 ### `resources`
 
-Standard Kubernetes resource requests/limits. Defaults to `requests: {cpu: 0.1, memory: 1Gi}` / `limits: {cpu: 2, memory: 1Gi}` (memory request == limit keeps Postgres in the Guaranteed QoS class; CPU is burstable for dump restore / ad-hoc queries). Override for larger workloads.
+Standard Kubernetes resource requests/limits. Defaults to `requests: {cpu: 0.1, memory: 1Gi}` / `limits: {cpu: 2, memory: 1Gi}` (memory request == limit, so the full 1Gi is reserved on the node; CPU is deliberately burstable for dump restore / ad-hoc queries, which puts the pod in the **Burstable** QoS class — Guaranteed would additionally require the CPU request to equal its limit, reserving 2 full cores per instance). Override for larger workloads.
 
 While `autoTune` is on (the default), `limits.memory` and `limits.cpu` are also the inputs the chart sizes Postgres from — so raising a limit actually gives Postgres more to work with. On the stock image it would not: `shared_buffers` stays at its 128MB default no matter how large the limit is, so raising the limit alone reserves cluster memory that Postgres never uses.
 
@@ -357,13 +357,17 @@ A `Memory`-medium `emptyDir` is charged against the container's memory limit, so
 
 Default `120`. The chart also runs `pg_ctl -m fast stop` in a `preStop` hook, given this budget minus 20s, floored at 10s so an unusably short grace period still yields a positive timeout.
 
-Postgres treats SIGTERM — the only signal Kubernetes sends — as a *smart* shutdown: it waits for every client to disconnect, indefinitely. (The image declares `STOPSIGNAL SIGINT` for a fast shutdown; Docker honours that, Kubernetes ignores it.) A single idle-in-transaction client — a Django app with a persistent connection is enough — holds the pod open until the grace period expires, and the SIGKILL that follows leaves an unclean data directory:
+Postgres reads SIGTERM as a *smart* shutdown — it waits for every client to disconnect, indefinitely — and SIGINT as a fast shutdown. Getting the smart one means the grace period expires, SIGKILL follows, and the next start has to crash-recover:
 
 ```
 LOG:  database system was not properly shut down; automatic recovery in progress
 ```
 
-That would otherwise happen on every rollout, node drain and upgrade. With the hook, shutdown completes in under a second with clients still attached, and the next start is clean.
+**The runtime already avoids this, so the hook is defence in depth rather than a fix for a live bug.** The postgres image declares `STOPSIGNAL SIGINT`, and containerd — which both kind and Talos use — honours it. Measured in `chart/tests/e2e/run.sh` on Kubernetes 1.36: with the hook patched out and a client held in an open transaction, the pod still logged `received fast shutdown request` and terminated in ~1s. The widely repeated claim that Kubernetes always sends SIGTERM is **not** true on containerd.
+
+The hook is kept because the clean-shutdown path otherwise depends entirely on a metadata field of whatever image `image.repository` points at. Swap in a Postgres image built without `STOPSIGNAL` and shutdown silently degrades to smart — no error, just crash recovery on every rollout, drain and upgrade. `pg_ctl -m fast stop` makes the behaviour explicit and image-independent for one sub-second exec per termination.
+
+The generous grace period is separate: it stops a large shutdown checkpoint (up to `shared_buffers` of dirty pages) from being truncated into a SIGKILL. It does not slow ordinary rollouts, because shutdown finishes long before it.
 
 ### Scheduling: `affinity`, `tolerations`, `nodeSelector`
 
@@ -605,14 +609,32 @@ No registry secret is needed — the workflow authenticates to GHCR with the bui
 ### CI
 
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on every PR and push to
-`main`, in three parallel jobs: `pre-commit` (hygiene hooks + `helm lint` + `helm
-unittest`), a standalone `helm lint`/`helm unittest` job, and the Docker integration
-suite (`chart/tests/integration/run.sh`). Locally, `./prepush.sh` runs the same ground.
+`main`, in four parallel jobs:
+
+| job | what it covers |
+| --- | --- |
+| `lint` | pre-commit hygiene hooks + `helm lint` + `helm unittest` |
+| `unittest` | standalone `helm lint` / `helm unittest` — rendered YAML and the render-time guards |
+| `integration` | `chart/tests/integration/run.sh` — real Postgres containers: the three restore formats, the corrupt-dump failure path, that the rendered parameters actually start Postgres, `pg_ctl -m fast stop` with a client attached, the `/dev/shm` A/B, and that the image still declares `STOPSIGNAL SIGINT` |
+| `e2e` | `chart/tests/e2e/run.sh` — a real cluster via kind: restricted-PSS admission, the secret-bootstrap Helm hooks, `emptyDir{medium: Memory}` sizing and enforcement, the preStop hook and what the runtime does without it, `max_connections` refusing rather than OOM-killing, upgrade rollouts, and the restore init container |
+
+Locally, `./prepush.sh` runs everything except the e2e suite, which creates and destroys a
+kind cluster and so is opt-in:
+
+```bash
+RUN_E2E=1 ./prepush.sh          # include it (~4 min)
+./chart/tests/e2e/run.sh        # or run it alone
+KEEP_CLUSTER=1 ./chart/tests/e2e/run.sh   # leave the cluster up to poke at
+```
+
+The e2e suite pins its node image to kind's default. When conclusions about kubelet or
+runtime behaviour matter, pin it to the target cluster's version instead:
+`K8S_NODE_IMAGE=kindest/node:vX.Y.Z ./chart/tests/e2e/run.sh`.
 
 ## Caveats
 
 - **Single replica, no backup, no WAL archiving.** For alpha/dev only — not production-grade.
-- **Raise `resources.limits.memory` to give Postgres more memory, not instead of it.** With `autoTune` on, `shared_buffers` and the rest follow the limit. With `autoTune` off they do not: `shared_buffers` stays at 128MB whatever the limit, so a large limit only reserves cluster memory that Postgres never touches — and because `requests == memory limit` puts the pod in Guaranteed QoS, that reservation is held for the pod's whole life.
+- **Raise `resources.limits.memory` to give Postgres more memory, not instead of it.** With `autoTune` on, `shared_buffers` and the rest follow the limit. With `autoTune` off they do not: `shared_buffers` stays at 128MB whatever the limit, so a large limit only reserves cluster memory that Postgres never touches — and because the memory request equals the limit, that reservation is held on the node for the pod's whole life.
 - **A memory limit below 512Mi now fails to render** (at the default `shm.size: 128Mi`). The connection budget has to leave room for backends. The error names the arithmetic; lower `shm.size` or raise the limit. Previously such a limit rendered and then OOM-killed under load instead. Note that limits this small also derive a small `max_connections` — 12 at 512Mi, 20 at 640Mi, 43 at 1Gi — so give Postgres at least 1Gi unless you know the app opens very few connections.
 - **No headless Service.** Per-pod DNS (`pod-0.svc.ns`) won't resolve. Apps must connect via the ClusterIP service name.
 - **Partial restore recovery is manual.** If restore fails mid-way, delete the PVC and reinstall — the wrapper will tell you so in logs.

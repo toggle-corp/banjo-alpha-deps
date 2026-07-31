@@ -162,10 +162,12 @@ spec:
             - -c
             - {{ printf "%s=%s" $k ($v | toString) | quote }}
             {{- end }}
-          # Kubernetes only ever sends SIGTERM, which Postgres reads as a smart
-          # shutdown and waits indefinitely for clients to disconnect. Shut down
-          # explicitly in fast mode instead, or the grace period expires and the
-          # SIGKILL leaves a data directory that crash-recovers on next start.
+          # Defence in depth, not a fix for a live bug: containerd honours the
+          # image's `STOPSIGNAL SIGINT`, so Postgres already fast-shuts-down
+          # cleanly here. This makes that explicit and independent of the image
+          # — a Postgres image built without STOPSIGNAL would otherwise get
+          # SIGTERM, read it as a *smart* shutdown, wait for clients, and be
+          # SIGKILLed into a crash-recovering data directory. See values.yaml.
           lifecycle:
             preStop:
               exec:

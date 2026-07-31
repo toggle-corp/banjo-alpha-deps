@@ -16,5 +16,16 @@ echo
 echo "==> integration tests (Docker, ~30s)"
 ./chart/tests/integration/run.sh
 
+# Opt-in: creates and destroys a kind cluster, so it is too slow for every push.
+# CI runs it on every PR regardless.
+if [ "${RUN_E2E:-0}" = "1" ]; then
+  echo
+  echo "==> e2e tests (kind, ~4 min)"
+  ./chart/tests/e2e/run.sh
+else
+  echo
+  echo "==> skipping kind e2e suite (set RUN_E2E=1 to include it; ~4 min)"
+fi
+
 echo
 echo "All checks passed."

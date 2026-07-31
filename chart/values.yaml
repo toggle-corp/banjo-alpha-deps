@@ -22,8 +22,11 @@ tcpg:
     tag: "8.11.1"
     pullPolicy: IfNotPresent
 
-  # Memory request == limit (1Gi) keeps Postgres in the Guaranteed QoS class.
-  # CPU burstable from 0.1 → 2 cores for dump restore / ad-hoc queries.
+  # Memory request == limit (1Gi), so the full 1Gi is reserved on the node and
+  # Postgres cannot be squeezed by neighbours. CPU is deliberately burstable
+  # (0.1 → 2 cores) for dump restore / ad-hoc queries, which means the pod is in
+  # the *Burstable* QoS class, not Guaranteed — Guaranteed would require the CPU
+  # request to equal the limit too, reserving 2 full cores per instance.
   #
   # With `autoTune` on (below), `limits.memory` and `limits.cpu` are also the
   # inputs the chart sizes Postgres from, so raising a limit actually gives
@@ -91,17 +94,28 @@ tcpg:
     enabled: true
     size: 128Mi
 
-  # Postgres treats SIGTERM — the only signal Kubernetes sends — as a *smart*
-  # shutdown: it waits for every client to disconnect, indefinitely. (The image
-  # declares `STOPSIGNAL SIGINT` for a fast shutdown, which Docker honours and
-  # Kubernetes ignores.) One idle-in-transaction client is enough to hold the
-  # pod open until the grace period expires, and the resulting SIGKILL leaves an
-  # unclean data directory that crash-recovers on the next start — on every
-  # rollout, node drain and upgrade.
+  # Shutdown. Postgres reads SIGTERM as a *smart* shutdown — it waits for every
+  # client to disconnect, indefinitely — and SIGINT as a fast shutdown. Getting
+  # the smart one means the grace period expires, SIGKILL follows, and the data
+  # directory crash-recovers on the next start.
   #
-  # The chart therefore runs `pg_ctl -m fast stop` in a preStop hook, which
-  # shuts down in under a second with clients still attached. The hook is given
-  # this budget minus 20s to finish.
+  # In practice the runtime already avoids that: the postgres image declares
+  # `STOPSIGNAL SIGINT`, and containerd (kind, and Talos on the tc cluster)
+  # honours it — measured in chart/tests/e2e, an un-hooked pod with a client
+  # held in an open transaction still logged "received fast shutdown request"
+  # and stopped in ~1s. The widely repeated claim that Kubernetes always sends
+  # SIGTERM is not true on containerd.
+  #
+  # The preStop hook below is therefore defence in depth, not a fix for a live
+  # bug. It is kept because the clean-shutdown path otherwise rests entirely on
+  # a metadata field of whatever image `image.repository` points at: swap in a
+  # Postgres image built without STOPSIGNAL and shutdown silently degrades to
+  # smart. `pg_ctl -m fast stop` makes the behaviour explicit and image-
+  # independent, and costs one sub-second exec per termination.
+  #
+  # The grace period is generous so a large shutdown checkpoint (up to
+  # shared_buffers of dirty pages) is never truncated into a SIGKILL. The hook
+  # gets this budget minus 20s, floored at 10s.
   terminationGracePeriodSeconds: 120
 
   # First-init only. These values seed the database the FIRST time it is

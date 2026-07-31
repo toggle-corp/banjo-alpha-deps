@@ -238,9 +238,28 @@ docker exec tcpg-tuning psql -U postgres -d testdb -tAc \
 echo "PASS [tuning]: all $applied parameters applied, pg_stat_statements usable"
 
 # ---------------------------------------------------------------------------
-# Shutdown: preStop must shut down cleanly with a client still attached.
-# Kubernetes only ever sends SIGTERM, which Postgres reads as a *smart* shutdown
-# and waits on indefinitely; the resulting SIGKILL crash-recovers on next start.
+# The image must keep declaring STOPSIGNAL SIGINT. Container runtimes honour it
+# (containerd does, so Kubernetes gets a *fast* shutdown), and that is what
+# makes the default shutdown path clean. If an image bump ever drops it,
+# Postgres would get SIGTERM, read it as a *smart* shutdown, wait for clients
+# and be SIGKILLed into crash recovery — at which point the chart's preStop hook
+# stops being belt-and-braces and becomes load-bearing. Assert the assumption
+# rather than rediscovering it.
+# ---------------------------------------------------------------------------
+stopsig=$(docker image inspect "$PG_IMAGE" --format '{{.Config.StopSignal}}')
+if [ "$stopsig" != "SIGINT" ]; then
+  echo "FAIL [stopsignal]: $PG_IMAGE declares STOPSIGNAL=$stopsig, expected SIGINT." >&2
+  echo "                   The preStop hook in chart/templates/tcpg/postgres.yaml is now" >&2
+  echo "                   the only thing preventing a smart-shutdown hang. Re-read the" >&2
+  echo "                   shutdown notes in docs/usages.md before changing anything." >&2
+  exit 1
+fi
+echo "PASS [stopsignal]: image declares STOPSIGNAL=SIGINT (fast shutdown)"
+
+# ---------------------------------------------------------------------------
+# Shutdown: `pg_ctl -m fast stop` — the command the chart's preStop hook runs —
+# must shut down cleanly with a client still attached, so the next start does
+# not crash-recover.
 # ---------------------------------------------------------------------------
 echo "==> [shutdown] holding a client in an open transaction, then running preStop..."
 docker exec -d tcpg-tuning \
