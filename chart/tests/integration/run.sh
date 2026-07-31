@@ -86,7 +86,13 @@ start_pg_detached() {
 wait_ready() {
   local name="$1"
   for _ in $(seq 1 60); do
-    if docker exec "$name" pg_isready -U postgres -d testdb >/dev/null 2>&1; then
+    # Must be a TCP check. While the entrypoint runs initdb and
+    # /docker-entrypoint-initdb.d (i.e. the restore), it starts a *temporary*
+    # server with `-c listen_addresses=''` — reachable over the unix socket but
+    # not TCP. A socket-based pg_isready therefore reports ready mid-restore, and
+    # the assertions below then race the restore they are meant to be checking.
+    # Only the final server listens on TCP. The chart's own probes do the same.
+    if docker exec "$name" pg_isready -U postgres -d testdb -h 127.0.0.1 -p 5432 >/dev/null 2>&1; then
       return 0
     fi
     sleep 1
