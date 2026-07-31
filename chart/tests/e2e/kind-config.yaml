@@ -1,0 +1,8 @@
+# Single-node cluster: enough for a single-replica StatefulSet, and cheap to
+# create/destroy in CI. The chart's RAID-avoiding nodeAffinity is satisfied
+# trivially here (an unlabelled node matches `NotIn true`) — that rule can only
+# be exercised on a mixed node pool, not in kind.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane

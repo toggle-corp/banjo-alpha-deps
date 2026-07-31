@@ -34,6 +34,9 @@ Copy this block into your overlay, fill the `# REQUIRED` lines, and delete the c
 # === Postgres (tcpg) =========================================================
 tcpg:
   enabled: true                 # REQUIRED to deploy Postgres at all
+  # Postgres parameters are sized from resources.limits automatically (autoTune,
+  # on by default) — nothing to set here. Override individual GUCs via
+  # `parameters`, and see the option reference before raising `work_mem`.
   init:
     # Bootstrapped into the tcpg-pg-credential Secret by a pre-install/pre-upgrade
     # Helm-hook Job (same model under plain Helm and GitOps — no lookup). Empty →
@@ -82,7 +85,7 @@ dragonfly:
 
 ## Alpha environment (tc cluster)
 
-This chart is alpha / tc-cluster-only, and its `values.yaml` defaults are already tuned for it: modest resource requests, `local-path` storage, a nodeAffinity rule that avoids RAID nodes, fixed resource names, and a 100 MiB/50 MiB MinIO request-body cap. There is **no separate overlay to layer** — just supply your per-install values (credentials, dump source, MinIO hostname) directly:
+This chart is alpha / tc-cluster-only, and its `values.yaml` defaults are already tuned for it: modest resource requests, `local-path` storage, a nodeAffinity rule that avoids RAID nodes, fixed resource names, a 100 MiB/50 MiB MinIO request-body cap, and Postgres parameters sized from the container's own resource limits (see [`autoTune`](#autotune--size-postgres-from-the-resource-limits)). There is **no separate overlay to layer** — just supply your per-install values (credentials, dump source, MinIO hostname) directly:
 
 ```bash
 helm install mydb ./chart -f values.yaml
@@ -265,7 +268,106 @@ Inline (`restore.auth.value`) and external (`restore.auth.existingSecret.name`) 
 
 ### `resources`
 
-Standard Kubernetes resource requests/limits. Defaults to `requests: {cpu: 0.1, memory: 1Gi}` / `limits: {cpu: 2, memory: 1Gi}` (memory request == limit keeps Postgres in the Guaranteed QoS class; CPU is burstable for dump restore / ad-hoc queries). Override for larger workloads.
+Standard Kubernetes resource requests/limits. Defaults to `requests: {cpu: 0.1, memory: 1Gi}` / `limits: {cpu: 2, memory: 1Gi}` (memory request == limit, so the full 1Gi is reserved on the node; CPU is deliberately burstable for dump restore / ad-hoc queries, which puts the pod in the **Burstable** QoS class — Guaranteed would additionally require the CPU request to equal its limit, reserving 2 full cores per instance). Override for larger workloads.
+
+While `autoTune` is on (the default), `limits.memory` and `limits.cpu` are also the inputs the chart sizes Postgres from — so raising a limit actually gives Postgres more to work with. On the stock image it would not: `shared_buffers` stays at its 128MB default no matter how large the limit is, so raising the limit alone reserves cluster memory that Postgres never uses.
+
+### `autoTune` — size Postgres from the resource limits
+
+`autoTune` (default `true`) derives Postgres parameters from `resources.limits` instead of leaving the image's defaults, which are written for a whole machine rather than a container:
+
+- **`effective_cache_size` defaults to 4GB regardless of the memory limit.** At a 1Gi limit the planner is told it has 4× the cache that exists — under cgroup v2 the page cache is charged to the container, so the real figure is roughly `limit − shared_buffers − /dev/shm`.
+- **`max_connections` defaults to 100 with no memory admission control.** At a 1Gi limit that is enough to OOM-kill a backend, and the postmaster then drops every session and crash-recovers the cluster. Verified against this exact config: 80 concurrent sorting connections at a 1Gi limit produced `OOMKilled`, `terminated by signal 9` and `all server processes terminated; reinitializing`.
+- **Worker counts come from the node's core count, not the limit.** A CPU limit is a CFS quota, not a cpuset, so Postgres sees every core on the node (8–24 on the tc cluster) and sizes 8 background workers against a 2-core quota.
+
+It also switches on query observability, which the stock config has none of.
+
+**This is not a throughput knob.** Measured on a 704MB dataset, none of the memory or planner values below changed throughput in either direction. They are here so the planner's model matches reality, so memory is bounded, and so slow queries are visible.
+
+Derivation, with `L` = `limits.memory`, `S` = `shm.size`, `C` = `limits.cpu` floored to whole cores:
+
+| parameter | derived as | at the 1Gi / 2-core default |
+|---|---|---|
+| `shared_buffers` | 25% of `L`, clamped to 128MB–4096MB | `256MB` |
+| `effective_cache_size` | `shared_buffers` + half the connection budget | `496MB` |
+| `work_mem` | fixed | `4MB` |
+| `maintenance_work_mem` | 10% of `L`, clamped to 64MB–1024MB | `102MB` |
+| `autovacuum_work_mem` | `L`/32, clamped to 16MB–256MB | `32MB` |
+| `autovacuum_max_workers` | pinned, so the budget is knowable | `3` |
+| `max_connections` | 90% of the connection budget ÷ 10MB per backend, capped at 200 | `43` |
+| `max_worker_processes` | `C × 2`, minimum 2 | `4` |
+| `max_parallel_workers` | `C` | `2` |
+| `max_parallel_workers_per_gather` | `C ÷ 2`, minimum 1 | `1` |
+| `max_parallel_maintenance_workers` | `C ÷ 2`, minimum 1 | `1` |
+| `random_page_cost` | fixed — node-local SSD | `1.1` |
+| `shared_preload_libraries` | fixed | `pg_stat_statements` |
+| `track_io_timing` | fixed | `on` |
+| `log_min_duration_statement` | fixed | `500ms` |
+| `log_lock_waits` | fixed | `on` |
+| `log_temp_files` | fixed | `0` (log all) |
+| `log_autovacuum_min_duration` | fixed | `0` (log all) |
+
+The connection budget is `L − shared_buffers − S − 64MB − (autovacuum_max_workers × autovacuum_work_mem)`, where the 64MB covers the postmaster, WAL buffers and other fixed overhead.
+
+`autovacuum_work_mem` and `autovacuum_max_workers` are set explicitly rather than left alone, because Postgres defaults `autovacuum_work_mem` to `-1` — meaning "use `maintenance_work_mem`", which is sized for one-off index builds. Left at the default, three autovacuum workers could each claim `maintenance_work_mem` (102MB at a 1Gi limit) entirely outside the budget. Overriding either one in `parameters` is costed against the budget, including an explicit `-1`.
+
+`pg_stat_statements` is preloaded but the view still needs creating once per database — the chart does not run SQL against an existing cluster:
+
+```sh
+kubectl exec -it tcpg-0 -- psql -U postgres -c 'CREATE EXTENSION IF NOT EXISTS pg_stat_statements;'
+```
+
+Set `autoTune: false` to keep Postgres' own defaults. That also disables the budget checks below, so `parameters` is then passed through unchecked.
+
+### `parameters` — Postgres configuration
+
+A map of Postgres parameters, layered on top of the derived defaults (yours win) and passed to the container as `-c key=value` args. Any GUC is accepted.
+
+```yaml
+tcpg:
+  parameters:
+    log_min_duration_statement: 100ms
+    wal_compression: lz4
+    work_mem: 16MB
+    max_connections: "25"     # work_mem this large only fits with fewer connections
+```
+
+Args rather than a mounted config file, because the official image offers no configuration env vars (the Bitnami image did) and the file routes do not work here: `-c include_dir=…` is rejected outright — `FATAL: unrecognized configuration parameter "include_dir"`, it is only legal *inside* a config file — and `-c config_file=…` would additionally force relocating `hba_file`/`ident_file`, which default to the config file's directory. Args are also the better GitOps fit: they are visible in the pod spec, and changing one rolls the StatefulSet with no checksum annotation involved.
+
+Two rules the chart enforces at render time while `autoTune` is on, both fail-closed:
+
+1. **Memory values need an explicit unit** (`kB`, `MB`, `GB`). A unit-less Postgres value is ambiguous — 8kB blocks for `shared_buffers`, kB for `work_mem` — so the chart cannot budget it.
+2. **The total must fit the memory limit:** `shared_buffers + shm.size + 64MB + max_connections × (6MB + work_mem) + autovacuum_max_workers × autovacuum_work_mem ≤ limits.memory`. Raising `work_mem` alone at 1Gi is refused, with the arithmetic in the error, because that is exactly the configuration that OOM-kills the cluster.
+
+A bad parameter name makes Postgres exit with `FATAL: unrecognized configuration parameter`. Normally that is just a crash-loop you fix by correcting the value. The one case that bites harder is a **first** install with `init.restore.enabled: true`: the bad parameter also stops the temporary server the entrypoint starts to run the restore, so PGDATA ends up initialised with no restore sentinel, and the entrypoint wrapper then refuses to start from it — recovery is a PVC delete. Cover parameter changes with a `chart/tests/tuning_test.yaml` assertion rather than finding out in-cluster.
+
+### `shm` — `/dev/shm` sizing
+
+- `shm.enabled` (default `true`), `shm.size` (default `128Mi`) — mounted as a `Memory`-medium `emptyDir` at `/dev/shm`.
+
+Kubernetes defaults `/dev/shm` to 64Mi. Parallel workers build hash tables there (`dynamic_shared_memory_type=posix`), and when it runs out the query does not slow down — it **fails**:
+
+```
+ERROR:  could not resize shared memory segment "/PostgreSQL.3382995114" to 16777216 bytes: No space left on device
+```
+
+A `Memory`-medium `emptyDir` is charged against the container's memory limit, so `shm.size` is part of the memory budget above. The chart refuses to render when it is smaller than `work_mem × (max_parallel_workers_per_gather + 1)`.
+
+### `terminationGracePeriodSeconds` — clean shutdown
+
+Default `120`. The chart also runs `pg_ctl -m fast stop` in a `preStop` hook, given this budget minus 20s, floored at 10s so an unusably short grace period still yields a positive timeout.
+
+Postgres reads SIGTERM as a *smart* shutdown — it waits for every client to disconnect, indefinitely — and SIGINT as a fast shutdown. Getting the smart one means the grace period expires, SIGKILL follows, and the next start has to crash-recover:
+
+```
+LOG:  database system was not properly shut down; automatic recovery in progress
+```
+
+**The runtime already avoids this, so the hook is defence in depth rather than a fix for a live bug.** The postgres image declares `STOPSIGNAL SIGINT`, and containerd — which both kind and Talos use — honours it. Measured in `chart/tests/e2e/run.sh` on Kubernetes 1.36: with the hook patched out and a client held in an open transaction, the pod still logged `received fast shutdown request` and terminated in ~1s. The widely repeated claim that Kubernetes always sends SIGTERM is **not** true on containerd.
+
+The hook is kept because the clean-shutdown path otherwise depends entirely on a metadata field of whatever image `image.repository` points at. Swap in a Postgres image built without `STOPSIGNAL` and shutdown silently degrades to smart — no error, just crash recovery on every rollout, drain and upgrade. `pg_ctl -m fast stop` makes the behaviour explicit and image-independent for one sub-second exec per termination.
+
+The generous grace period is separate: it stops a large shutdown checkpoint (up to `shared_buffers` of dirty pages) from being truncated into a SIGKILL. It does not slow ordinary rollouts, because shutdown finishes long before it.
 
 ### Scheduling: `affinity`, `tolerations`, `nodeSelector`
 
@@ -507,13 +609,33 @@ No registry secret is needed — the workflow authenticates to GHCR with the bui
 ### CI
 
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on every PR and push to
-`main`, in three parallel jobs: `pre-commit` (hygiene hooks + `helm lint` + `helm
-unittest`), a standalone `helm lint`/`helm unittest` job, and the Docker integration
-suite (`chart/tests/integration/run.sh`). Locally, `./prepush.sh` runs the same ground.
+`main`, in four parallel jobs:
+
+| job | what it covers |
+| --- | --- |
+| `lint` | pre-commit hygiene hooks + `helm lint` + `helm unittest` |
+| `unittest` | standalone `helm lint` / `helm unittest` — rendered YAML and the render-time guards |
+| `integration` | `chart/tests/integration/run.sh` — real Postgres containers: the three restore formats, the corrupt-dump failure path, that the rendered parameters actually start Postgres, `pg_ctl -m fast stop` with a client attached, the `/dev/shm` A/B, and that the image still declares `STOPSIGNAL SIGINT` |
+| `e2e` | `chart/tests/e2e/run.sh` — a real cluster via kind: restricted-PSS admission, the secret-bootstrap Helm hooks, `emptyDir{medium: Memory}` sizing and enforcement, the preStop hook and what the runtime does without it, `max_connections` refusing rather than OOM-killing, upgrade rollouts, and the restore init container |
+
+Locally, `./prepush.sh` runs everything except the e2e suite, which creates and destroys a
+kind cluster and so is opt-in:
+
+```bash
+RUN_E2E=1 ./prepush.sh          # include it (~4 min)
+./chart/tests/e2e/run.sh        # or run it alone
+KEEP_CLUSTER=1 ./chart/tests/e2e/run.sh   # leave the cluster up to poke at
+```
+
+The e2e suite pins its node image to kind's default. When conclusions about kubelet or
+runtime behaviour matter, pin it to the target cluster's version instead:
+`K8S_NODE_IMAGE=kindest/node:vX.Y.Z ./chart/tests/e2e/run.sh`.
 
 ## Caveats
 
 - **Single replica, no backup, no WAL archiving.** For alpha/dev only — not production-grade.
+- **Raise `resources.limits.memory` to give Postgres more memory, not instead of it.** With `autoTune` on, `shared_buffers` and the rest follow the limit. With `autoTune` off they do not: `shared_buffers` stays at 128MB whatever the limit, so a large limit only reserves cluster memory that Postgres never touches — and because the memory request equals the limit, that reservation is held on the node for the pod's whole life.
+- **A memory limit below 512Mi now fails to render** (at the default `shm.size: 128Mi`). The connection budget has to leave room for backends. The error names the arithmetic; lower `shm.size` or raise the limit. Previously such a limit rendered and then OOM-killed under load instead. Note that limits this small also derive a small `max_connections` — 12 at 512Mi, 20 at 640Mi, 43 at 1Gi — so give Postgres at least 1Gi unless you know the app opens very few connections.
 - **No headless Service.** Per-pod DNS (`pod-0.svc.ns`) won't resolve. Apps must connect via the ClusterIP service name.
 - **Partial restore recovery is manual.** If restore fails mid-way, delete the PVC and reinstall — the wrapper will tell you so in logs.
 - **Benign `chmod: /var/run/postgresql: Operation not permitted` on pod start.** The official postgres image's entrypoint unconditionally tries `chmod 03775 /var/run/postgresql`. With `readOnlyRootFilesystem: true` we mount an `emptyDir` there (owned by `root:<fsGroup>` via k8s), and the non-root pg user can't chmod it. The entrypoint itself swallows the exit code (`|| :`) and the socket is still created correctly — it's a cosmetic line. Silencing it would require running an init container as root, which isn't worth the hardening tradeoff.
