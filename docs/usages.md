@@ -289,10 +289,12 @@ Derivation, with `L` = `limits.memory`, `S` = `shm.size`, `C` = `limits.cpu` flo
 | parameter | derived as | at the 1Gi / 2-core default |
 |---|---|---|
 | `shared_buffers` | 25% of `L`, clamped to 128MB–4096MB | `256MB` |
-| `effective_cache_size` | `shared_buffers` + half the connection budget | `544MB` |
+| `effective_cache_size` | `shared_buffers` + half the connection budget | `496MB` |
 | `work_mem` | fixed | `4MB` |
 | `maintenance_work_mem` | 10% of `L`, clamped to 64MB–1024MB | `102MB` |
-| `max_connections` | connection budget ÷ 10MB per backend, capped at 200 | `57` |
+| `autovacuum_work_mem` | `L`/32, clamped to 16MB–256MB | `32MB` |
+| `autovacuum_max_workers` | pinned, so the budget is knowable | `3` |
+| `max_connections` | 90% of the connection budget ÷ 10MB per backend, capped at 200 | `43` |
 | `max_worker_processes` | `C × 2`, minimum 2 | `4` |
 | `max_parallel_workers` | `C` | `2` |
 | `max_parallel_workers_per_gather` | `C ÷ 2`, minimum 1 | `1` |
@@ -305,7 +307,9 @@ Derivation, with `L` = `limits.memory`, `S` = `shm.size`, `C` = `limits.cpu` flo
 | `log_temp_files` | fixed | `0` (log all) |
 | `log_autovacuum_min_duration` | fixed | `0` (log all) |
 
-The connection budget is `L − shared_buffers − S − 64MB` (the 64MB covers the postmaster, WAL buffers and autovacuum workers).
+The connection budget is `L − shared_buffers − S − 64MB − (autovacuum_max_workers × autovacuum_work_mem)`, where the 64MB covers the postmaster, WAL buffers and other fixed overhead.
+
+`autovacuum_work_mem` and `autovacuum_max_workers` are set explicitly rather than left alone, because Postgres defaults `autovacuum_work_mem` to `-1` — meaning "use `maintenance_work_mem`", which is sized for one-off index builds. Left at the default, three autovacuum workers could each claim `maintenance_work_mem` (102MB at a 1Gi limit) entirely outside the budget. Overriding either one in `parameters` is costed against the budget, including an explicit `-1`.
 
 `pg_stat_statements` is preloaded but the view still needs creating once per database — the chart does not run SQL against an existing cluster:
 
@@ -333,9 +337,9 @@ Args rather than a mounted config file, because the official image offers no con
 Two rules the chart enforces at render time while `autoTune` is on, both fail-closed:
 
 1. **Memory values need an explicit unit** (`kB`, `MB`, `GB`). A unit-less Postgres value is ambiguous — 8kB blocks for `shared_buffers`, kB for `work_mem` — so the chart cannot budget it.
-2. **The total must fit the memory limit:** `shared_buffers + shm.size + 64MB + max_connections × (6MB + work_mem) ≤ limits.memory`. Raising `work_mem` alone at 1Gi is refused, with the arithmetic in the error, because that is exactly the configuration that OOM-kills the cluster.
+2. **The total must fit the memory limit:** `shared_buffers + shm.size + 64MB + max_connections × (6MB + work_mem) + autovacuum_max_workers × autovacuum_work_mem ≤ limits.memory`. Raising `work_mem` alone at 1Gi is refused, with the arithmetic in the error, because that is exactly the configuration that OOM-kills the cluster.
 
-A bad parameter name makes Postgres exit with `FATAL: unrecognized configuration parameter`, and on a *first* install that leaves an initialised PGDATA whose restore never completed — which the entrypoint wrapper refuses to start from, requiring a PVC delete. Cover parameter changes with a `chart/tests/tuning_test.yaml` assertion rather than finding out in-cluster.
+A bad parameter name makes Postgres exit with `FATAL: unrecognized configuration parameter`. Normally that is just a crash-loop you fix by correcting the value. The one case that bites harder is a **first** install with `init.restore.enabled: true`: the bad parameter also stops the temporary server the entrypoint starts to run the restore, so PGDATA ends up initialised with no restore sentinel, and the entrypoint wrapper then refuses to start from it — recovery is a PVC delete. Cover parameter changes with a `chart/tests/tuning_test.yaml` assertion rather than finding out in-cluster.
 
 ### `shm` — `/dev/shm` sizing
 
@@ -351,7 +355,7 @@ A `Memory`-medium `emptyDir` is charged against the container's memory limit, so
 
 ### `terminationGracePeriodSeconds` — clean shutdown
 
-Default `120`. The chart also runs `pg_ctl -m fast stop` in a `preStop` hook, given this budget minus 20s.
+Default `120`. The chart also runs `pg_ctl -m fast stop` in a `preStop` hook, given this budget minus 20s, floored at 10s so an unusably short grace period still yields a positive timeout.
 
 Postgres treats SIGTERM — the only signal Kubernetes sends — as a *smart* shutdown: it waits for every client to disconnect, indefinitely. (The image declares `STOPSIGNAL SIGINT` for a fast shutdown; Docker honours that, Kubernetes ignores it.) A single idle-in-transaction client — a Django app with a persistent connection is enough — holds the pod open until the grace period expires, and the SIGKILL that follows leaves an unclean data directory:
 
@@ -609,7 +613,7 @@ suite (`chart/tests/integration/run.sh`). Locally, `./prepush.sh` runs the same 
 
 - **Single replica, no backup, no WAL archiving.** For alpha/dev only — not production-grade.
 - **Raise `resources.limits.memory` to give Postgres more memory, not instead of it.** With `autoTune` on, `shared_buffers` and the rest follow the limit. With `autoTune` off they do not: `shared_buffers` stays at 128MB whatever the limit, so a large limit only reserves cluster memory that Postgres never touches — and because `requests == memory limit` puts the pod in Guaranteed QoS, that reservation is held for the pod's whole life.
-- **A memory limit below ~448Mi now fails to render** (at the default `shm.size: 128Mi`). The connection budget (`limit − shared_buffers − shm.size − 64MB`) has to leave room for backends. The error names the arithmetic; lower `shm.size` or raise the limit. Previously such a limit rendered and then OOM-killed under load instead. Note that limits this small also derive a small `max_connections` — 19 at 512Mi, 16 at 480Mi — so give Postgres at least 1Gi unless you know the app opens very few connections.
+- **A memory limit below 512Mi now fails to render** (at the default `shm.size: 128Mi`). The connection budget has to leave room for backends. The error names the arithmetic; lower `shm.size` or raise the limit. Previously such a limit rendered and then OOM-killed under load instead. Note that limits this small also derive a small `max_connections` — 12 at 512Mi, 20 at 640Mi, 43 at 1Gi — so give Postgres at least 1Gi unless you know the app opens very few connections.
 - **No headless Service.** Per-pod DNS (`pod-0.svc.ns`) won't resolve. Apps must connect via the ClusterIP service name.
 - **Partial restore recovery is manual.** If restore fails mid-way, delete the PVC and reinstall — the wrapper will tell you so in logs.
 - **Benign `chmod: /var/run/postgresql: Operation not permitted` on pod start.** The official postgres image's entrypoint unconditionally tries `chmod 03775 /var/run/postgresql`. With `readOnlyRootFilesystem: true` we mount an `emptyDir` there (owned by `root:<fsGroup>` via k8s), and the non-root pg user can't chmod it. The entrypoint itself swallows the exit code (`|| :`) and the socket is still created correctly — it's a cosmetic line. Silencing it would require running an init container as root, which isn't worth the hardening tradeoff.

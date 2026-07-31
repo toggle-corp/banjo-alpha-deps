@@ -62,9 +62,11 @@ tcpg:
   # Postgres parameters, layered on top of the derived defaults (these win) and
   # passed as `-c key=value` container args. Any GUC is accepted.
   #
-  # Memory values must carry an explicit unit (kB/MB/GB) so the chart can budget
-  # them against `resources.limits.memory` — a unit-less Postgres value is
-  # ambiguous (8kB blocks for shared_buffers, kB for work_mem).
+  # While `autoTune` is on, memory values must carry an explicit unit (kB/MB/GB)
+  # so the chart can budget them against `resources.limits.memory` — a unit-less
+  # Postgres value is ambiguous (8kB blocks for shared_buffers, kB for work_mem).
+  # With `autoTune: false` there is no budget to check against, so values here
+  # are passed through unvalidated.
   #
   # Changing a value here rolls the StatefulSet. Note that a bad parameter makes
   # Postgres exit with `FATAL: unrecognized configuration parameter`, so cover
@@ -82,8 +84,9 @@ tcpg:
   #   ERROR: could not resize shared memory segment ...: No space left on device
   #
   # A Memory-medium emptyDir counts against the container's memory limit, so
-  # this size is part of the memory budget. The chart fails to render if it is
-  # smaller than `work_mem x (max_parallel_workers_per_gather + 1)`.
+  # this size is part of the memory budget. While `autoTune` is on, the chart
+  # fails to render if it is smaller than
+  # `work_mem x (max_parallel_workers_per_gather + 1)`.
   shm:
     enabled: true
     size: 128Mi
@@ -174,9 +177,10 @@ tcpg:
       type: RuntimeDefault
 
   # Applied to every container (init + main). Defaults satisfy the restricted
-  # Pod Security Standard (PSS). The chart mounts emptyDirs at /tmp and (for
-  # the main container) /var/run/postgresql so readOnlyRootFilesystem: true is
-  # safe — Postgres writes only under $PGDATA, the unix-socket dir, and /tmp.
+  # Pod Security Standard (PSS). The chart mounts emptyDirs at /tmp and (for the
+  # main container) /var/run/postgresql and /dev/shm, so
+  # readOnlyRootFilesystem: true is safe — Postgres writes only under $PGDATA,
+  # the unix-socket dir, /tmp, and (for parallel-query shared memory) /dev/shm.
   containerSecurityContext:
     allowPrivilegeEscalation: false
     readOnlyRootFilesystem: true

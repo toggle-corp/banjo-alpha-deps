@@ -20,7 +20,11 @@ tests:
           value:
             - postgres
             - -c
-            - effective_cache_size=544MB
+            - autovacuum_max_workers=3
+            - -c
+            - autovacuum_work_mem=32MB
+            - -c
+            - effective_cache_size=496MB
             - -c
             - log_autovacuum_min_duration=0
             - -c
@@ -32,7 +36,7 @@ tests:
             - -c
             - maintenance_work_mem=102MB
             - -c
-            - max_connections=57
+            - max_connections=43
             - -c
             - max_parallel_maintenance_workers=1
             - -c
@@ -60,7 +64,7 @@ tests:
       # 25% of 16Gi, clamped at the 4096MB ceiling
       - contains: { path: "spec.template.spec.containers[0].args", content: shared_buffers=4096MB }
       # shared_buffers + half of what is left for backends
-      - contains: { path: "spec.template.spec.containers[0].args", content: effective_cache_size=10144MB }
+      - contains: { path: "spec.template.spec.containers[0].args", content: effective_cache_size=9760MB }
       - contains: { path: "spec.template.spec.containers[0].args", content: maintenance_work_mem=1024MB }
       # connection budget is large, so the 200 cap applies
       - contains: { path: "spec.template.spec.containers[0].args", content: max_connections=200 }
@@ -163,10 +167,53 @@ tests:
     set:
       tcpg.parameters:
         work_mem: 16MB
-        max_connections: "25"
+        max_connections: "20"
     asserts:
       - contains: { path: "spec.template.spec.containers[0].args", content: work_mem=16MB }
-      - contains: { path: "spec.template.spec.containers[0].args", content: max_connections=25 }
+      - contains: { path: "spec.template.spec.containers[0].args", content: max_connections=20 }
+
+  # Autovacuum is the largest non-connection allocator and Postgres defaults
+  # autovacuum_work_mem to -1 (= maintenance_work_mem), so it has to be both
+  # pinned and budgeted.
+  - it: pins and budgets autovacuum working memory
+    template: tcpg/postgres.yaml
+    asserts:
+      - contains: { path: "spec.template.spec.containers[0].args", content: autovacuum_work_mem=32MB }
+      - contains: { path: "spec.template.spec.containers[0].args", content: autovacuum_max_workers=3 }
+
+  - it: scales autovacuum_work_mem with the memory limit, capped
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.resources.limits.memory: 16Gi
+    asserts:
+      # 16Gi/32 = 512MB, clamped at the 256MB ceiling
+      - contains: { path: "spec.template.spec.containers[0].args", content: autovacuum_work_mem=256MB }
+
+  - it: refuses autovacuum_work_mem -1, which silently means maintenance_work_mem
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.parameters:
+        autovacuum_work_mem: "-1"
+    asserts:
+      # 3 workers x maintenance_work_mem 102Mi is what Postgres' own default does
+      - failedTemplate:
+          errorPattern: "3 autovacuum workers x 102Mi = 1184Mi, over resources.limits.memory 1024Mi"
+
+  - it: budgets an increased autovacuum_max_workers
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.parameters:
+        autovacuum_max_workers: "12"
+    asserts:
+      - failedTemplate:
+          errorPattern: "12 autovacuum workers x 32Mi"
+
+  - it: leaves real headroom at the default limit rather than sizing to the edge
+    template: tcpg/postgres.yaml
+    asserts:
+      # 256 + 128 + 64 + 43x10 + 3x32 = 974Mi of the 1024Mi limit. The budget
+      # check must pass, and the derived defaults must not sit flush against it.
+      - contains: { path: "spec.template.spec.containers[0].args", content: max_connections=43 }
 
   - it: refuses a unit-less memory parameter, which is ambiguous in Postgres
     template: tcpg/postgres.yaml
@@ -210,7 +257,7 @@ tests:
       tcpg.resources.limits.memory: 384Mi
     asserts:
       - failedTemplate:
-          errorPattern: "leaves only 64Mi for connections"
+          errorPattern: "leaves only 16Mi for client connections"
 
   - it: requires resources.limits.memory while autoTune is on
     template: tcpg/postgres.yaml
@@ -295,7 +342,7 @@ tests:
           path: spec.template.spec.containers[0].volumeMounts
           content: { name: dshm, mountPath: /dev/shm }
       # the 128Mi it would have taken goes back to the connection budget
-      - contains: { path: "spec.template.spec.containers[0].args", content: max_connections=70 }
+      - contains: { path: "spec.template.spec.containers[0].args", content: max_connections=54 }
 
   # --- shutdown -------------------------------------------------------------
 

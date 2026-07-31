@@ -163,12 +163,22 @@ Sizing model, with L = memory limit, S = /dev/shm (a Memory-medium emptyDir is
 charged against the container's memory limit, so it must be budgeted):
 
   shared_buffers  25% of L, clamped to 128MB..4096MB
-  reserve         64MB for postmaster, WAL buffers, autovacuum workers
-  connBudget      L - shared_buffers - S - reserve  → memory left for backends
-  max_connections connBudget / 10MB per backend (≈6MB RSS + 4MB work_mem),
-                  capped at 200. This is the guard that matters: at a 1Gi limit
-                  the stock max_connections of 100 lets the kernel OOM-kill the
-                  postmaster, which drops every session and crash-recovers.
+  reserve         64MB for the postmaster, WAL buffers and other fixed overhead
+  autovacuum_work_mem
+                  L/32, clamped to 16MB..256MB, and `autovacuum_max_workers`
+                  pinned so the total is knowable. Both are set explicitly
+                  because Postgres defaults autovacuum_work_mem to -1, meaning
+                  "use maintenance_work_mem" — which is sized for one-off index
+                  builds and would otherwise let 3 autovacuum workers claim
+                  3 x maintenance_work_mem outside any budget.
+  connBudget      L - shared_buffers - S - reserve - (workers x autovacuum_work_mem)
+                  → memory left for client backends
+  max_connections 90% of connBudget / 10MB per backend (≈6MB RSS + 4MB work_mem),
+                  capped at 200. The 90% keeps real headroom rather than sizing
+                  the defaults exactly up to the limit. This is the guard that
+                  matters: at a 1Gi limit the stock max_connections of 100 lets
+                  the kernel OOM-kill the postmaster, which drops every session
+                  and crash-recovers.
   effective_cache_size
                   shared_buffers + half of connBudget. Under cgroup v2 the page
                   cache is charged to the container, so the stock 4GB default is
@@ -185,15 +195,20 @@ matches reality and so memory is bounded — not for a speed number.
 {{- $cores := include "tcpg.cpuLimitCores" . | int -}}
 {{- $sb := min 4096 (max 128 (div (mul $limitMi 25) 100)) -}}
 {{- $reserve := 64 -}}
-{{- $connBudget := sub $limitMi (add (add $sb $shmMi) $reserve) -}}
+{{- $avWorkers := 3 -}}
+{{- $avWorkMem := min 256 (max 16 (div $limitMi 32)) -}}
+{{- $avTotal := mul $avWorkers $avWorkMem -}}
+{{- $connBudget := sub $limitMi (add (add (add $sb $shmMi) $reserve) $avTotal) -}}
 {{- if le $connBudget 128 -}}
-{{- fail (printf "tcpg: resources.limits.memory (%dMi) leaves only %dMi for connections after shared_buffers %dMi + /dev/shm %dMi + %dMi overhead. Raise resources.limits.memory, or lower tcpg.shm.size." $limitMi $connBudget $sb $shmMi $reserve) -}}
+{{- fail (printf "tcpg: resources.limits.memory (%dMi) leaves only %dMi for client connections after shared_buffers %dMi + /dev/shm %dMi + %dMi fixed overhead + %d autovacuum workers x %dMi. Raise resources.limits.memory, or lower tcpg.shm.size." $limitMi $connBudget $sb $shmMi $reserve $avWorkers $avWorkMem) -}}
 {{- end -}}
-{{- $maxConn := min 200 (div $connBudget 10) -}}
+{{- $maxConn := min 200 (div (div (mul $connBudget 9) 10) 10) -}}
 shared_buffers: "{{ $sb }}MB"
 effective_cache_size: "{{ add $sb (div $connBudget 2) }}MB"
 work_mem: "4MB"
 maintenance_work_mem: "{{ min 1024 (max 64 (div $limitMi 10)) }}MB"
+autovacuum_work_mem: "{{ $avWorkMem }}MB"
+autovacuum_max_workers: "{{ $avWorkers }}"
 max_connections: "{{ $maxConn }}"
 max_worker_processes: "{{ max 2 (mul $cores 2) }}"
 max_parallel_workers: "{{ $cores }}"
@@ -222,10 +237,25 @@ Arg: dict {params, root}.
 {{- $wmMi := include "tcpg.pgMemToMi" (dict "name" "work_mem" "value" (get $p "work_mem")) | int -}}
 {{- $maxConn := get $p "max_connections" | toString | int -}}
 {{- $perGather := get $p "max_parallel_workers_per_gather" | toString | int -}}
+{{- /*
+Autovacuum is budgeted from the *final* merged values, so overriding either one
+is accounted for rather than silently escaping the check. Postgres treats
+autovacuum_work_mem = -1 as "use maintenance_work_mem", so an override to -1 has
+to be costed at maintenance_work_mem.
+*/ -}}
+{{- $avWorkers := get $p "autovacuum_max_workers" | toString | int -}}
+{{- $avRaw := get $p "autovacuum_work_mem" | toString -}}
+{{- $avWorkMem := 0 -}}
+{{- if eq $avRaw "-1" -}}
+{{- $avWorkMem = include "tcpg.pgMemToMi" (dict "name" "maintenance_work_mem" "value" (get $p "maintenance_work_mem")) | int -}}
+{{- else -}}
+{{- $avWorkMem = include "tcpg.pgMemToMi" (dict "name" "autovacuum_work_mem" "value" $avRaw) | int -}}
+{{- end -}}
+{{- $avTotal := mul $avWorkers $avWorkMem -}}
 {{- /* 1. total memory must fit the limit — otherwise the postmaster gets OOM-killed */ -}}
-{{- $need := add (add (add $sbMi $shmMi) 64) (mul $maxConn (add 6 $wmMi)) -}}
+{{- $need := add (add (add (add $sbMi $shmMi) 64) (mul $maxConn (add 6 $wmMi))) $avTotal -}}
 {{- if gt $need $limitMi -}}
-{{- fail (printf "tcpg memory budget exceeded: shared_buffers %dMi + /dev/shm %dMi + 64Mi overhead + max_connections %d x (6Mi backend + work_mem %dMi) = %dMi, over resources.limits.memory %dMi. Under this load the kernel OOM-kills a backend, which crash-recovers the whole cluster and drops every session. Lower work_mem or max_connections in tcpg.parameters, or raise resources.limits.memory." $sbMi $shmMi $maxConn $wmMi $need $limitMi) -}}
+{{- fail (printf "tcpg memory budget exceeded: shared_buffers %dMi + /dev/shm %dMi + 64Mi overhead + max_connections %d x (6Mi backend + work_mem %dMi) + %d autovacuum workers x %dMi = %dMi, over resources.limits.memory %dMi. Under this load the kernel OOM-kills a backend, which crash-recovers the whole cluster and drops every session. Lower work_mem, max_connections or autovacuum_work_mem in tcpg.parameters, or raise resources.limits.memory." $sbMi $shmMi $maxConn $wmMi $avWorkers $avWorkMem $need $limitMi) -}}
 {{- end -}}
 {{- /* 2. /dev/shm must hold a parallel hash table — otherwise queries hard-error */ -}}
 {{- if $root.Values.tcpg.shm.enabled -}}
