@@ -24,6 +24,11 @@ tcpg:
 
   # Memory request == limit (1Gi) keeps Postgres in the Guaranteed QoS class.
   # CPU burstable from 0.1 → 2 cores for dump restore / ad-hoc queries.
+  #
+  # With `autoTune` on (below), `limits.memory` and `limits.cpu` are also the
+  # inputs the chart sizes Postgres from, so raising a limit actually gives
+  # Postgres more to work with — on the stock image, raising the limit alone
+  # changes nothing, because shared_buffers stays at its 128MB default.
   resources:
     requests:
       cpu: 0.1
@@ -31,6 +36,70 @@ tcpg:
     limits:
       cpu: 2
       memory: 1Gi
+
+  # Size Postgres from `resources.limits` instead of leaving the image's stock
+  # defaults, which are wrong for a container:
+  #   - effective_cache_size defaults to 4GB regardless of the memory limit, so
+  #     at 1Gi the planner is told it has 4x the cache that exists (under
+  #     cgroup v2 the page cache is charged to the container).
+  #   - max_connections defaults to 100 with no memory admission control. At a
+  #     1Gi limit that is enough to OOM-kill the postmaster, which drops every
+  #     session and crash-recovers the cluster.
+  #   - worker counts are derived from the *node's* core count, because a CPU
+  #     limit is a CFS quota and not a cpuset — Postgres sees 8–24 cores here
+  #     and sizes 8 background workers against a 2-core quota.
+  # Also turns on query observability (pg_stat_statements, slow-query and
+  # lock-wait logging), which the stock config has none of.
+  #
+  # This is not a throughput knob: measured on a 704MB dataset, the memory and
+  # planner values changed throughput neither way. It exists to make the
+  # planner's model match reality and to bound memory.
+  #
+  # See docs/usages.md for the derivation and the exact defaults. Set to false
+  # to keep Postgres' own defaults (this also disables the budget checks).
+  autoTune: true
+
+  # Postgres parameters, layered on top of the derived defaults (these win) and
+  # passed as `-c key=value` container args. Any GUC is accepted.
+  #
+  # Memory values must carry an explicit unit (kB/MB/GB) so the chart can budget
+  # them against `resources.limits.memory` — a unit-less Postgres value is
+  # ambiguous (8kB blocks for shared_buffers, kB for work_mem).
+  #
+  # Changing a value here rolls the StatefulSet. Note that a bad parameter makes
+  # Postgres exit with `FATAL: unrecognized configuration parameter`, so cover
+  # changes with a unit test rather than discovering it in-cluster.
+  #
+  #   parameters:
+  #     work_mem: 16MB          # budget-checked against max_connections
+  #     log_min_duration_statement: 100ms
+  parameters: {}
+
+  # `/dev/shm`, mounted as a Memory-medium emptyDir. Kubernetes defaults it to
+  # 64Mi, which is too small for parallel query: workers build hash tables in
+  # shared memory (`dynamic_shared_memory_type=posix`) and when it runs out the
+  # query does not slow down, it fails —
+  #   ERROR: could not resize shared memory segment ...: No space left on device
+  #
+  # A Memory-medium emptyDir counts against the container's memory limit, so
+  # this size is part of the memory budget. The chart fails to render if it is
+  # smaller than `work_mem x (max_parallel_workers_per_gather + 1)`.
+  shm:
+    enabled: true
+    size: 128Mi
+
+  # Postgres treats SIGTERM — the only signal Kubernetes sends — as a *smart*
+  # shutdown: it waits for every client to disconnect, indefinitely. (The image
+  # declares `STOPSIGNAL SIGINT` for a fast shutdown, which Docker honours and
+  # Kubernetes ignores.) One idle-in-transaction client is enough to hold the
+  # pod open until the grace period expires, and the resulting SIGKILL leaves an
+  # unclean data directory that crash-recovers on the next start — on every
+  # rollout, node drain and upgrade.
+  #
+  # The chart therefore runs `pg_ctl -m fast stop` in a preStop hook, which
+  # shuts down in under a second with clients still attached. The hook is given
+  # this budget minus 20s to finish.
+  terminationGracePeriodSeconds: 120
 
   # First-init only. These values seed the database the FIRST time it is
   # initialized: the credentials below seed the DB, and the dump/restore config

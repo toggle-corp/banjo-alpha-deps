@@ -1,0 +1,361 @@
+suite: tcpg tuning (parameters, /dev/shm, shutdown)
+templates:
+  - tcpg/postgres.yaml
+  - tcpg/secrets.yaml
+  - tcpg/configmap.yaml
+set:
+  tcpg.enabled: true
+release:
+  name: my-release
+tests:
+  # --- derived parameters ----------------------------------------------------
+
+  - it: renders every derived parameter as sorted -c args at the default 1Gi/2-core limits
+    template: tcpg/postgres.yaml
+    asserts:
+      # Exact list, so the arg order stays deterministic across renders (map
+      # iteration is key-sorted) and every derived value is pinned.
+      - equal:
+          path: spec.template.spec.containers[0].args
+          value:
+            - postgres
+            - -c
+            - effective_cache_size=544MB
+            - -c
+            - log_autovacuum_min_duration=0
+            - -c
+            - log_lock_waits=on
+            - -c
+            - log_min_duration_statement=500ms
+            - -c
+            - log_temp_files=0
+            - -c
+            - maintenance_work_mem=102MB
+            - -c
+            - max_connections=57
+            - -c
+            - max_parallel_maintenance_workers=1
+            - -c
+            - max_parallel_workers=2
+            - -c
+            - max_parallel_workers_per_gather=1
+            - -c
+            - max_worker_processes=4
+            - -c
+            - random_page_cost=1.1
+            - -c
+            - shared_buffers=256MB
+            - -c
+            - shared_preload_libraries=pg_stat_statements
+            - -c
+            - track_io_timing=on
+            - -c
+            - work_mem=4MB
+
+  - it: scales memory parameters with resources.limits.memory
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.resources.limits.memory: 16Gi
+    asserts:
+      # 25% of 16Gi, clamped at the 4096MB ceiling
+      - contains: { path: "spec.template.spec.containers[0].args", content: shared_buffers=4096MB }
+      # shared_buffers + half of what is left for backends
+      - contains: { path: "spec.template.spec.containers[0].args", content: effective_cache_size=10144MB }
+      - contains: { path: "spec.template.spec.containers[0].args", content: maintenance_work_mem=1024MB }
+      # connection budget is large, so the 200 cap applies
+      - contains: { path: "spec.template.spec.containers[0].args", content: max_connections=200 }
+
+  - it: derives worker counts from the CPU limit, not the node's core count
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.resources.limits.cpu: 8
+      tcpg.resources.limits.memory: 8Gi
+    asserts:
+      - contains: { path: "spec.template.spec.containers[0].args", content: max_parallel_workers=8 }
+      - contains: { path: "spec.template.spec.containers[0].args", content: max_worker_processes=16 }
+      - contains: { path: "spec.template.spec.containers[0].args", content: max_parallel_workers_per_gather=4 }
+      - contains: { path: "spec.template.spec.containers[0].args", content: max_parallel_maintenance_workers=4 }
+
+  - it: floors a fractional CPU limit to at least one core
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.resources.limits.cpu: 500m
+    asserts:
+      - contains: { path: "spec.template.spec.containers[0].args", content: max_parallel_workers=1 }
+      - contains: { path: "spec.template.spec.containers[0].args", content: max_worker_processes=2 }
+      - contains: { path: "spec.template.spec.containers[0].args", content: max_parallel_workers_per_gather=1 }
+
+  - it: turns on query observability, which the stock config has none of
+    template: tcpg/postgres.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: shared_preload_libraries=pg_stat_statements
+      - contains: { path: "spec.template.spec.containers[0].args", content: track_io_timing=on }
+      - contains: { path: "spec.template.spec.containers[0].args", content: log_min_duration_statement=500ms }
+      - contains: { path: "spec.template.spec.containers[0].args", content: log_lock_waits=on }
+
+  # --- user overrides -------------------------------------------------------
+
+  - it: lets tcpg.parameters override a derived value
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.parameters:
+        shared_buffers: 192MB
+        log_min_duration_statement: 100ms
+    asserts:
+      - contains: { path: "spec.template.spec.containers[0].args", content: shared_buffers=192MB }
+      - contains: { path: "spec.template.spec.containers[0].args", content: log_min_duration_statement=100ms }
+      - notContains: { path: "spec.template.spec.containers[0].args", content: shared_buffers=256MB }
+      - notContains: { path: "spec.template.spec.containers[0].args", content: log_min_duration_statement=500ms }
+
+  - it: passes through a parameter the chart does not derive
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.parameters:
+        wal_compression: lz4
+    asserts:
+      - contains: { path: "spec.template.spec.containers[0].args", content: wal_compression=lz4 }
+      - contains: { path: "spec.template.spec.containers[0].args", content: shared_buffers=256MB }
+
+  - it: falls back to the image's own defaults when autoTune is off
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.autoTune: false
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].args
+          value: [postgres]
+
+  - it: still passes explicit parameters when autoTune is off
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.autoTune: false
+      tcpg.parameters:
+        shared_buffers: 512MB
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].args
+          value: [postgres, -c, shared_buffers=512MB]
+
+  - it: does not budget-check parameters when autoTune is off
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.autoTune: false
+      tcpg.parameters:
+        work_mem: 512MB
+    asserts:
+      - contains: { path: "spec.template.spec.containers[0].args", content: work_mem=512MB }
+
+  # --- budget guards --------------------------------------------------------
+
+  - it: refuses a work_mem that would let the kernel OOM-kill the cluster
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.parameters:
+        work_mem: 16MB
+    asserts:
+      - failedTemplate:
+          errorPattern: "tcpg memory budget exceeded.*work_mem 16Mi.*over resources.limits.memory 1024Mi"
+
+  - it: accepts a larger work_mem once max_connections is brought down to fit
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.parameters:
+        work_mem: 16MB
+        max_connections: "25"
+    asserts:
+      - contains: { path: "spec.template.spec.containers[0].args", content: work_mem=16MB }
+      - contains: { path: "spec.template.spec.containers[0].args", content: max_connections=25 }
+
+  - it: refuses a unit-less memory parameter, which is ambiguous in Postgres
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.parameters:
+        work_mem: "16384"
+    asserts:
+      - failedTemplate:
+          errorPattern: 'tcpg.parameters.work_mem = "16384" needs an explicit unit'
+
+  - it: refuses a /dev/shm too small for a parallel hash table
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.resources.limits.memory: 16Gi
+      tcpg.resources.limits.cpu: 4
+      tcpg.parameters:
+        work_mem: 64MB
+        max_connections: "20"
+    asserts:
+      - failedTemplate:
+          errorPattern: "tcpg.shm.size \\(128Mi\\) is too small for work_mem 64Mi"
+
+  - it: accepts that work_mem once /dev/shm is raised to fit
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.resources.limits.memory: 16Gi
+      tcpg.resources.limits.cpu: 4
+      tcpg.shm.size: 256Mi
+      tcpg.parameters:
+        work_mem: 64MB
+        max_connections: "20"
+    asserts:
+      - contains: { path: "spec.template.spec.containers[0].args", content: work_mem=64MB }
+      - equal:
+          path: spec.template.spec.volumes[?(@.name=="dshm")].emptyDir.sizeLimit
+          value: 256Mi
+
+  - it: refuses a memory limit too small to leave room for connections
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.resources.limits.memory: 384Mi
+    asserts:
+      - failedTemplate:
+          errorPattern: "leaves only 64Mi for connections"
+
+  - it: requires resources.limits.memory while autoTune is on
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.resources.limits.memory: null
+    asserts:
+      - failedTemplate:
+          errorPattern: "tcpg.resources.limits.memory must be set while tcpg.autoTune is true"
+
+  - it: reports a missing limit rather than a template error when resources is empty
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.resources: null
+    asserts:
+      - failedTemplate:
+          errorPattern: "tcpg.resources.limits.memory must be set while tcpg.autoTune is true"
+
+  - it: parses a memory limit given as a byte count
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.resources.limits.memory: 2147483648   # 2Gi
+    asserts:
+      - contains: { path: "spec.template.spec.containers[0].args", content: shared_buffers=512MB }
+
+  - it: parses Ti and Mi memory limits
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.resources.limits.memory: 1Ti
+    asserts:
+      # clamped at the shared_buffers ceiling
+      - contains: { path: "spec.template.spec.containers[0].args", content: shared_buffers=4096MB }
+      - contains: { path: "spec.template.spec.containers[0].args", content: max_connections=200 }
+
+  - it: rejects a memory limit it cannot parse
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.resources.limits.memory: 1TiB
+    asserts:
+      - failedTemplate:
+          errorPattern: 'cannot parse memory quantity "1TiB"'
+
+  - it: requires resources.limits.cpu while autoTune is on
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.resources.limits.cpu: null
+    asserts:
+      - failedTemplate:
+          errorPattern: "tcpg.resources.limits.cpu must be set while tcpg.autoTune is true"
+
+  # --- /dev/shm -------------------------------------------------------------
+
+  - it: mounts a Memory-medium /dev/shm, since the 64Mi default fails parallel queries
+    template: tcpg/postgres.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: dshm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 128Mi
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content: { name: dshm, mountPath: /dev/shm }
+
+  - it: tracks the configured /dev/shm size
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.shm.size: 512Mi
+      tcpg.resources.limits.memory: 4Gi
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[?(@.name=="dshm")].emptyDir.sizeLimit
+          value: 512Mi
+
+  - it: omits /dev/shm entirely when disabled, and drops it from the memory budget
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.shm.enabled: false
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content: { name: dshm, mountPath: /dev/shm }
+      # the 128Mi it would have taken goes back to the connection budget
+      - contains: { path: "spec.template.spec.containers[0].args", content: max_connections=70 }
+
+  # --- shutdown -------------------------------------------------------------
+
+  - it: shuts Postgres down in fast mode, because Kubernetes only sends SIGTERM
+    template: tcpg/postgres.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].lifecycle.preStop.exec.command
+          value:
+            - sh
+            - -c
+            - exec pg_ctl -D "$PGDATA" -m fast -w -t 100 stop
+      - equal:
+          path: spec.template.spec.terminationGracePeriodSeconds
+          value: 120
+
+  - it: keeps the pg_ctl timeout inside the grace period
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.terminationGracePeriodSeconds: 60
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].lifecycle.preStop.exec.command[2]
+          value: exec pg_ctl -D "$PGDATA" -m fast -w -t 40 stop
+      - equal:
+          path: spec.template.spec.terminationGracePeriodSeconds
+          value: 60
+
+  - it: keeps the pg_ctl timeout positive under an unusably short grace period
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.terminationGracePeriodSeconds: 15
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].lifecycle.preStop.exec.command[2]
+          value: exec pg_ctl -D "$PGDATA" -m fast -w -t 10 stop
+
+  # --- interaction with the restore wrapper ---------------------------------
+
+  - it: passes parameters through the restore entrypoint wrapper
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.init.restore.enabled: true
+      tcpg.init.restore.baseUrl: https://example.com
+      tcpg.init.restore.path: /d.dump
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value:
+            - /bin/sh
+            - /etc/postgres-wrapper/entrypoint-wrapper.sh
+      - equal:
+          path: spec.template.spec.containers[0].args[0]
+          value: postgres
+      - contains: { path: "spec.template.spec.containers[0].args", content: shared_buffers=256MB }
+
+  - it: sets no command override when restore is disabled, so the image entrypoint takes the args
+    template: tcpg/postgres.yaml
+    asserts:
+      - isNull: { path: "spec.template.spec.containers[0].command" }
+      - equal:
+          path: spec.template.spec.containers[0].args[0]
+          value: postgres

@@ -29,6 +29,7 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.tcpg.terminationGracePeriodSeconds }}
       securityContext:
         {{- toYaml .Values.tcpg.podSecurityContext | nindent 8 }}
       {{- if .Values.tcpg.init.restore.enabled }}
@@ -147,9 +148,31 @@ spec:
           command:
             - /bin/sh
             - /etc/postgres-wrapper/entrypoint-wrapper.sh
+          {{- end }}
+          {{- /*
+          Parameters are passed as `-c key=value` args. When restore is enabled
+          they follow the wrapper; otherwise the image entrypoint receives
+          `postgres -c ...` directly. Map iteration is key-sorted, so the arg
+          list is deterministic across renders.
+          */}}
+          {{- $params := include "tcpg.parameters" . | fromYaml }}
           args:
             - postgres
-          {{- end }}
+            {{- range $k, $v := $params }}
+            - -c
+            - {{ printf "%s=%s" $k ($v | toString) | quote }}
+            {{- end }}
+          # Kubernetes only ever sends SIGTERM, which Postgres reads as a smart
+          # shutdown and waits indefinitely for clients to disconnect. Shut down
+          # explicitly in fast mode instead, or the grace period expires and the
+          # SIGKILL leaves a data directory that crash-recovers on next start.
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - sh
+                  - -c
+                  - exec pg_ctl -D "$PGDATA" -m fast -w -t {{ max 10 (sub .Values.tcpg.terminationGracePeriodSeconds 20) }} stop
           ports:
             - name: postgres
               containerPort: 5432
@@ -202,6 +225,10 @@ spec:
               mountPath: /tmp
             - name: run-postgresql
               mountPath: /var/run/postgresql
+            {{- if .Values.tcpg.shm.enabled }}
+            - name: dshm
+              mountPath: /dev/shm
+            {{- end }}
             {{- if .Values.tcpg.init.restore.enabled }}
             # /restore is RW: 10-restore.sh deletes the dump after a successful restore to free the emptyDir.
             - name: restore
@@ -237,6 +264,14 @@ spec:
           emptyDir: {}
         - name: run-postgresql
           emptyDir: {}
+        {{- if .Values.tcpg.shm.enabled }}
+        # Parallel workers build hash tables here; the 64Mi Kubernetes default
+        # makes such queries fail outright rather than run slowly.
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.tcpg.shm.size }}
+        {{- end }}
         {{- if .Values.tcpg.init.restore.enabled }}
         - name: restore
           emptyDir: {}
