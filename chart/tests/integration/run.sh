@@ -293,7 +293,17 @@ if [ "$(docker inspect -f '{{.State.Running}}' tcpg-tuning)" != "false" ]; then
   docker logs tcpg-tuning 2>&1 | tail -20 >&2
   exit 1
 fi
-if ! docker logs tcpg-tuning 2>&1 | grep -q "database system is shut down"; then
+# Retry: `docker logs` can lag the container's final lines by a moment, so a
+# single grep right after the container exits is racy on slower I/O.
+clean_stop=0
+for _ in $(seq 1 15); do
+  if docker logs tcpg-tuning 2>&1 | grep -q "database system is shut down"; then
+    clean_stop=1
+    break
+  fi
+  sleep 1
+done
+if [ "$clean_stop" != "1" ]; then
   echo "FAIL [shutdown]: no clean-shutdown line in the log" >&2
   docker logs tcpg-tuning 2>&1 | tail -20 >&2
   exit 1

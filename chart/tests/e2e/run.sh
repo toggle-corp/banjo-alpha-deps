@@ -271,6 +271,14 @@ delete_and_time() {
   local start; start=$(date +%s)
   k delete pod tcpg-0 --wait=true >/dev/null
   local elapsed=$(( $(date +%s) - start ))
+  # `kubectl logs -f` ends by itself once the pod is gone. Let it drain rather
+  # than killing it immediately, or the final shutdown lines can be missing from
+  # the captured log and the assertions read that as an unclean shutdown.
+  local waited=0
+  while kill -0 "$logpid" 2>/dev/null && [ "$waited" -lt 15 ]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
   kill "$logpid" >/dev/null 2>&1 || true
   wait "$logpid" >/dev/null 2>&1 || true
   echo "$elapsed"
