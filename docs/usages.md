@@ -764,10 +764,15 @@ git push origin v1.2.3 && git push
 
 Pushing the tag runs [`.github/workflows/release.yml`](../.github/workflows/release.yml), which:
 
-1. renders the changelog for that tag using `fugit/configs/cliff.toml`,
+1. extracts the release notes from the topmost section of the committed `CHANGELOG.md`,
 2. packages the chart and pushes it to `oci://ghcr.io/toggle-corp` — landing at
    `ghcr.io/toggle-corp/banjo-alpha-deps:<version>`,
-3. creates the GitHub Release with the changelog as its body and the `.tgz` attached.
+3. creates the GitHub Release with those notes as its body and the `.tgz` attached.
+
+The notes come from `CHANGELOG.md` rather than a fresh `git-cliff --latest` render so
+that the Release body and the changelog cannot disagree. `--latest` resolves the previous
+release to the adjacent tag, so a stable release cut straight after a `-dev` tag renders
+an empty body.
 
 No registry secret is needed — the workflow authenticates to GHCR with the built-in
 `GITHUB_TOKEN`.

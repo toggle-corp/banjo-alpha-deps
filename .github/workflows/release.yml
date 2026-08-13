@@ -22,10 +22,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          # fugit/configs/cliff.toml lives in the submodule.
-          submodules: true
 
       - name: Resolve version
         id: version
@@ -63,28 +59,22 @@ jobs:
           fi
           echo "chart/Chart.yaml version: $declared"
 
-      - name: Install typos
-        # cliff.toml's commit preprocessor shells out to `typos`. Without it the
-        # preprocessor exits non-zero and git-cliff silently drops every commit,
-        # rendering a changelog with headers but no body.
-        uses: taiki-e/install-action@v2
-        with:
-          tool: typos
+      # release.sh generates CHANGELOG.md and commits it in the tagged commit, so
+      # the release notes are its topmost section. Re-rendering here with
+      # `git-cliff --latest` instead would diverge: --latest resolves the previous
+      # release to the adjacent dev tag, so a stable release cut right after a dev
+      # tag renders an empty body.
+      - name: Extract the release notes
+        shell: bash
+        run: |
+          awk '/^## /{ section++ } section == 1' CHANGELOG.md > RELEASE_NOTES.md
 
-      - name: Generate changelog
-        id: git-cliff
-        uses: orhun/git-cliff-action@v4
-        with:
-          config: fugit/configs/cliff.toml
-          # No --no-exec: it would disable both the typos preprocessor and the
-          # URL postprocessors, leaving literal <REPO> placeholders in the output.
-          args: -vv --latest --strip all --github-repo ${{ github.repository }}
-        env:
-          OUTPUT: CHANGELOG.latest.md
-          # cliff.toml substitutes these into commit/compare links via sed.
-          # Unset -> the links render as empty strings.
-          FUGIT_REMOTE_BASE_URL: https://github.com/${{ github.repository }}
-          FUGIT_REMOTE_PLATFORM_URL: https://github.com
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "::error::No release notes found in CHANGELOG.md"
+            exit 1
+          fi
+
+          cat RELEASE_NOTES.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Set up Helm
         uses: azure/setup-helm@v4
@@ -115,6 +105,6 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           name: ${{ steps.version.outputs.version_tag }}
           prerelease: ${{ steps.version.outputs.is_prerelease }}
-          body: ${{ steps.git-cliff.outputs.content }}
+          body_path: RELEASE_NOTES.md
           # Offline fallback for clusters whose ArgoCD repo-server can't reach GHCR.
           files: ${{ steps.package.outputs.path }}
