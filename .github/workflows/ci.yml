@@ -62,7 +62,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The suite renders the chart (`helm template`) to check that the
+      # parameters it produces actually start Postgres, and chart/charts/*.tgz is
+      # gitignored, so the subcharts have to be fetched here.
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Fetch chart dependencies
+        run: helm dep build chart
+
       - name: Run restore-pipeline integration suite
         # Spins up real postgres containers to exercise plain SQL / gzipped SQL /
-        # pg_dump -Fc restores plus the corrupt-dump failure path. ~40s.
+        # pg_dump -Fc restores, the corrupt-dump failure path, that the rendered
+        # parameters actually start Postgres, `pg_ctl -m fast stop` with a client
+        # attached, the /dev/shm A/B, and the image's STOPSIGNAL. ~1 min.
         run: ./chart/tests/integration/run.sh
+
+  e2e:
+    name: E2E tests (kind)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Fetch chart dependencies
+        run: helm dep build chart
+
+      - name: Run kind e2e suite
+        # Installs the chart into a real cluster to cover what the Docker suite
+        # cannot: restricted-PSS admission, the secret-bootstrap Helm hooks,
+        # emptyDir{medium: Memory} sizing and enforcement, the preStop hook and
+        # what the runtime does without it, the max_connections cap refusing
+        # instead of OOM-killing, upgrade rollouts, and the restore init
+        # container. Creates and destroys its own cluster. ~4 min.
+        run: ./chart/tests/e2e/run.sh

@@ -110,7 +110,10 @@ tests:
     asserts:
       - isNull: { path: spec.template.spec.initContainers }
       - isNull: { path: 'spec.template.spec.containers[0].command' }
-      - isNull: { path: 'spec.template.spec.containers[0].args' }
+      # `args` is always rendered — it carries the Postgres parameters, and with
+      # no command override the image entrypoint receives `postgres -c ...`.
+      # See tests/tuning_test.yaml.
+      - equal: { path: 'spec.template.spec.containers[0].args[0]', value: postgres }
       - notContains:
           path: spec.template.spec.containers[0].volumeMounts
           content:
@@ -361,10 +364,9 @@ tests:
           value:
             - /bin/sh
             - /etc/postgres-wrapper/entrypoint-wrapper.sh
-      - equal:
-          path: spec.template.spec.containers[0].args
-          value:
-            - postgres
+      # The wrapper execs `docker-entrypoint.sh "$@"`, so the Postgres
+      # parameters follow `postgres` in args. See tests/tuning_test.yaml.
+      - equal: { path: 'spec.template.spec.containers[0].args[0]', value: postgres }
 
   - it: mounts restore, restore-script, and wrapper when restore is enabled
     template: tcpg/postgres.yaml

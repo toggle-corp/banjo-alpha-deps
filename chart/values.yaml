@@ -22,8 +22,16 @@ tcpg:
     tag: "8.11.1"
     pullPolicy: IfNotPresent
 
-  # Memory request == limit (1Gi) keeps Postgres in the Guaranteed QoS class.
-  # CPU burstable from 0.1 → 2 cores for dump restore / ad-hoc queries.
+  # Memory request == limit (1Gi), so the full 1Gi is reserved on the node and
+  # Postgres cannot be squeezed by neighbours. CPU is deliberately burstable
+  # (0.1 → 2 cores) for dump restore / ad-hoc queries, which means the pod is in
+  # the *Burstable* QoS class, not Guaranteed — Guaranteed would require the CPU
+  # request to equal the limit too, reserving 2 full cores per instance.
+  #
+  # With `autoTune` on (below), `limits.memory` and `limits.cpu` are also the
+  # inputs the chart sizes Postgres from, so raising a limit actually gives
+  # Postgres more to work with — on the stock image, raising the limit alone
+  # changes nothing, because shared_buffers stays at its 128MB default.
   resources:
     requests:
       cpu: 0.1
@@ -31,6 +39,84 @@ tcpg:
     limits:
       cpu: 2
       memory: 1Gi
+
+  # Size Postgres from `resources.limits` instead of leaving the image's stock
+  # defaults, which are wrong for a container:
+  #   - effective_cache_size defaults to 4GB regardless of the memory limit, so
+  #     at 1Gi the planner is told it has 4x the cache that exists (under
+  #     cgroup v2 the page cache is charged to the container).
+  #   - max_connections defaults to 100 with no memory admission control. At a
+  #     1Gi limit that is enough to OOM-kill the postmaster, which drops every
+  #     session and crash-recovers the cluster.
+  #   - worker counts are derived from the *node's* core count, because a CPU
+  #     limit is a CFS quota and not a cpuset — Postgres sees 8–24 cores here
+  #     and sizes 8 background workers against a 2-core quota.
+  # Also turns on query observability (pg_stat_statements, slow-query and
+  # lock-wait logging), which the stock config has none of.
+  #
+  # This is not a throughput knob: measured on a 704MB dataset, the memory and
+  # planner values changed throughput neither way. It exists to make the
+  # planner's model match reality and to bound memory.
+  #
+  # See docs/usages.md for the derivation and the exact defaults. Set to false
+  # to keep Postgres' own defaults (this also disables the budget checks).
+  autoTune: true
+
+  # Postgres parameters, layered on top of the derived defaults (these win) and
+  # passed as `-c key=value` container args. Any GUC is accepted.
+  #
+  # While `autoTune` is on, memory values must carry an explicit unit (kB/MB/GB)
+  # so the chart can budget them against `resources.limits.memory` — a unit-less
+  # Postgres value is ambiguous (8kB blocks for shared_buffers, kB for work_mem).
+  # With `autoTune: false` there is no budget to check against, so values here
+  # are passed through unvalidated.
+  #
+  # Changing a value here rolls the StatefulSet. Note that a bad parameter makes
+  # Postgres exit with `FATAL: unrecognized configuration parameter`, so cover
+  # changes with a unit test rather than discovering it in-cluster.
+  #
+  #   parameters:
+  #     work_mem: 16MB          # budget-checked against max_connections
+  #     log_min_duration_statement: 100ms
+  parameters: {}
+
+  # `/dev/shm`, mounted as a Memory-medium emptyDir. Kubernetes defaults it to
+  # 64Mi, which is too small for parallel query: workers build hash tables in
+  # shared memory (`dynamic_shared_memory_type=posix`) and when it runs out the
+  # query does not slow down, it fails —
+  #   ERROR: could not resize shared memory segment ...: No space left on device
+  #
+  # A Memory-medium emptyDir counts against the container's memory limit, so
+  # this size is part of the memory budget. While `autoTune` is on, the chart
+  # fails to render if it is smaller than
+  # `work_mem x (max_parallel_workers_per_gather + 1)`.
+  shm:
+    enabled: true
+    size: 128Mi
+
+  # Shutdown. Postgres reads SIGTERM as a *smart* shutdown — it waits for every
+  # client to disconnect, indefinitely — and SIGINT as a fast shutdown. Getting
+  # the smart one means the grace period expires, SIGKILL follows, and the data
+  # directory crash-recovers on the next start.
+  #
+  # In practice the runtime already avoids that: the postgres image declares
+  # `STOPSIGNAL SIGINT`, and containerd (kind, and Talos on the tc cluster)
+  # honours it — measured in chart/tests/e2e, an un-hooked pod with a client
+  # held in an open transaction still logged "received fast shutdown request"
+  # and stopped in ~1s. The widely repeated claim that Kubernetes always sends
+  # SIGTERM is not true on containerd.
+  #
+  # The preStop hook below is therefore defence in depth, not a fix for a live
+  # bug. It is kept because the clean-shutdown path otherwise rests entirely on
+  # a metadata field of whatever image `image.repository` points at: swap in a
+  # Postgres image built without STOPSIGNAL and shutdown silently degrades to
+  # smart. `pg_ctl -m fast stop` makes the behaviour explicit and image-
+  # independent, and costs one sub-second exec per termination.
+  #
+  # The grace period is generous so a large shutdown checkpoint (up to
+  # shared_buffers of dirty pages) is never truncated into a SIGKILL. The hook
+  # gets this budget minus 20s, floored at 10s.
+  terminationGracePeriodSeconds: 120
 
   # First-init only. These values seed the database the FIRST time it is
   # initialized: the credentials below seed the DB, and the dump/restore config
@@ -105,9 +191,10 @@ tcpg:
       type: RuntimeDefault
 
   # Applied to every container (init + main). Defaults satisfy the restricted
-  # Pod Security Standard (PSS). The chart mounts emptyDirs at /tmp and (for
-  # the main container) /var/run/postgresql so readOnlyRootFilesystem: true is
-  # safe — Postgres writes only under $PGDATA, the unix-socket dir, and /tmp.
+  # Pod Security Standard (PSS). The chart mounts emptyDirs at /tmp and (for the
+  # main container) /var/run/postgresql and /dev/shm, so
+  # readOnlyRootFilesystem: true is safe — Postgres writes only under $PGDATA,
+  # the unix-socket dir, /tmp, and (for parallel-query shared memory) /dev/shm.
   containerSecurityContext:
     allowPrivilegeEscalation: false
     readOnlyRootFilesystem: true
