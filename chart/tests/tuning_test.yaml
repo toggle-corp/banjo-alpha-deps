@@ -30,7 +30,7 @@ tests:
             - -c
             - log_lock_waits=on
             - -c
-            - log_min_duration_statement=500ms
+            - log_min_duration_statement=2s
             - -c
             - log_temp_files=0
             - -c
@@ -96,7 +96,7 @@ tests:
           path: spec.template.spec.containers[0].args
           content: shared_preload_libraries=pg_stat_statements
       - contains: { path: "spec.template.spec.containers[0].args", content: track_io_timing=on }
-      - contains: { path: "spec.template.spec.containers[0].args", content: log_min_duration_statement=500ms }
+      - contains: { path: "spec.template.spec.containers[0].args", content: log_min_duration_statement=2s }
       - contains: { path: "spec.template.spec.containers[0].args", content: log_lock_waits=on }
 
   # --- user overrides -------------------------------------------------------
@@ -111,7 +111,7 @@ tests:
       - contains: { path: "spec.template.spec.containers[0].args", content: shared_buffers=192MB }
       - contains: { path: "spec.template.spec.containers[0].args", content: log_min_duration_statement=100ms }
       - notContains: { path: "spec.template.spec.containers[0].args", content: shared_buffers=256MB }
-      - notContains: { path: "spec.template.spec.containers[0].args", content: log_min_duration_statement=500ms }
+      - notContains: { path: "spec.template.spec.containers[0].args", content: log_min_duration_statement=2s }
 
   - it: passes through a parameter the chart does not derive
     template: tcpg/postgres.yaml

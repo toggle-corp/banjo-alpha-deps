@@ -1,0 +1,106 @@
+{{- if and .Values.tcpg.enabled (include "tcpg.extensionNames" . | trim) }}
+{{- /*
+`CREATE EXTENSION` needs a *running* server, so unlike the credential-bootstrap
+Jobs this one is a post-install/post-upgrade hook (ArgoCD converts that to
+PostSync). Helm does not wait for the StatefulSet to be Ready before running
+post-install hooks, so the Job polls for readiness itself.
+
+Static fields are computed at RENDER time — the extension list is validated by
+`tcpg.extensionNames`, so a bad name fails the render, not psql. The credential
+is read at runtime from the Secret the pre-install hook bootstrapped.
+*/ -}}
+{{- $extensions := include "tcpg.extensionNames" . | trim -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "tcpg.fullname" . }}-extension-bootstrap
+  labels:
+    {{- include "tcpg.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation
+    # ArgoCD ignores helm.sh/hook-weight; it orders PostSync by sync-wave.
+    "argocd.argoproj.io/sync-wave": "0"
+spec:
+  backoffLimit: {{ .Values.tcpg.extensionBootstrap.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.tcpg.extensionBootstrap.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "tcpg.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.tcpg.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      restartPolicy: OnFailure
+      securityContext:
+        {{- toYaml .Values.tcpg.podSecurityContext | nindent 8 }}
+      containers:
+        - name: bootstrap
+          # The server image — it already carries a psql of the matching major
+          # version, so no second image to pin and bump.
+          image: "{{ .Values.tcpg.image.repository }}:{{ .Values.tcpg.image.tag }}"
+          imagePullPolicy: {{ .Values.tcpg.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.tcpg.containerSecurityContext | nindent 12 }}
+          resources: {{- toYaml .Values.tcpg.extensionBootstrap.resources | nindent 12 }}
+          env:
+            - name: EXTENSIONS
+              value: {{ $extensions | quote }}
+            - name: WAIT_TIMEOUT_SECONDS
+              value: {{ .Values.tcpg.extensionBootstrap.waitTimeoutSeconds | quote }}
+            # psql writes .psqlrc/.psql_history under $HOME; the root filesystem
+            # is read-only, so point it at the tmp emptyDir.
+            - name: HOME
+              value: /tmp
+          envFrom:
+            # POSTGRES_{HOST,PORT,USER,PASSWORD,DB} — bootstrapped by the
+            # pre-install hook (templates/tcpg/secret-bootstrap-job.yaml).
+            - secretRef:
+                name: {{ include "tcpg.pgSecretName" . }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              PGPASSWORD=$POSTGRES_PASSWORD; export PGPASSWORD
+
+              waited=0
+              until pg_isready -q -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB"; do
+                if [ "$waited" -ge "$WAIT_TIMEOUT_SECONDS" ]; then
+                  echo "error: $POSTGRES_HOST:$POSTGRES_PORT not ready after ${WAIT_TIMEOUT_SECONDS}s" >&2
+                  exit 1
+                fi
+                waited=$((waited + 5))
+                sleep 5
+              done
+
+              # Names are render-time restricted to [A-Za-z0-9_], so word
+              # splitting and the SQL interpolation below are both safe.
+              for ext in $EXTENSIONS; do
+                echo "creating extension $ext in $POSTGRES_DB (if not present)"
+                psql -v ON_ERROR_STOP=1 --no-psqlrc -q \
+                  -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+                  -c "CREATE EXTENSION IF NOT EXISTS \"$ext\""
+              done
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.tcpg.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tcpg.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tcpg.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

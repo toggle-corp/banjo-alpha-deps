@@ -49,6 +49,36 @@ name — bootstraps both the tcpg and minio credential Secrets.
 {{- end -}}
 
 {{/*
+Validated, space-joined extension names for the extension-bootstrap Job.
+
+Names are interpolated into SQL inside the Job, so they are restricted here to
+`[A-Za-z0-9_]` at render time — the only quoting-safe set, and wide enough for
+every extension name Postgres ships. A name outside it fails the render rather
+than reaching psql.
+
+`pg_stat_statements` additionally has to be in the effective
+`shared_preload_libraries`, otherwise `CREATE EXTENSION` errors with
+`pg_stat_statements must be loaded via "shared_preload_libraries"` and the hook
+fails the release. Checking the merged parameters catches both `autoTune: false`
+and a `parameters.shared_preload_libraries` override that drops it.
+*/}}
+{{- define "tcpg.extensionNames" -}}
+{{- $names := .Values.tcpg.extensions | default (list) -}}
+{{- range $names -}}
+{{- if not (regexMatch "^[A-Za-z0-9_]+$" (. | toString)) -}}
+{{- fail (printf "tcpg.extensions: %q is not a valid extension name — only letters, digits and underscore are allowed" (. | toString)) -}}
+{{- end -}}
+{{- end -}}
+{{- if has "pg_stat_statements" $names -}}
+{{- $preload := get (include "tcpg.parameters" . | fromYaml) "shared_preload_libraries" | default "" | toString -}}
+{{- if not (has "pg_stat_statements" (splitList "," (nospace $preload))) -}}
+{{- fail "tcpg.extensions includes pg_stat_statements, but it is not in the effective shared_preload_libraries (tcpg.autoTune is off, or parameters.shared_preload_libraries overrides it) — CREATE EXTENSION would fail. Add it to tcpg.parameters.shared_preload_libraries, or drop it from tcpg.extensions." -}}
+{{- end -}}
+{{- end -}}
+{{- $names | join " " -}}
+{{- end -}}
+
+{{/*
 ================================ tuning =======================================
 The official `postgres` image has no configuration env vars (the Bitnami image
 did). Parameters reach Postgres as `-c key=value` container args — validated as
@@ -217,7 +247,7 @@ max_parallel_maintenance_workers: "{{ max 1 (div $cores 2) }}"
 random_page_cost: "1.1"
 shared_preload_libraries: "pg_stat_statements"
 track_io_timing: "on"
-log_min_duration_statement: "500ms"
+log_min_duration_statement: "2s"
 log_lock_waits: "on"
 log_temp_files: "0"
 log_autovacuum_min_duration: "0"

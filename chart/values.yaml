@@ -80,6 +80,48 @@ tcpg:
   #     log_min_duration_statement: 100ms
   parameters: {}
 
+  # Extensions created in `init.database` by a post-install/post-upgrade Helm-hook
+  # Job (templates/tcpg/extension-bootstrap-job.yaml). `CREATE EXTENSION` needs a
+  # running server, so this hook runs *after* the StatefulSet exists — unlike the
+  # credential bootstrap, which is pre-install. ArgoCD converts the Helm hook to
+  # PostSync. Each name is applied with `IF NOT EXISTS`, so re-running is a no-op
+  # and the Job is safe on every upgrade.
+  #
+  # This is the SOLE gate: an empty list renders no Job, no hook, nothing.
+  #
+  # Names are restricted at render time to letters, digits and underscore — they
+  # are interpolated into SQL, and anything else fails the render. Creating an
+  # extension needs superuser, which `init.username` is by default.
+  #
+  # `pg_stat_statements` is here because `autoTune` preloads the library but the
+  # view still has to be created once per database. Keeping the two in sync is
+  # checked at render time: listing it while it is absent from the effective
+  # `shared_preload_libraries` (autoTune off, or overridden in `parameters`) fails
+  # the render rather than failing the hook mid-release.
+  extensions:
+    - pg_stat_statements
+
+  extensionBootstrap:
+    # Helm does not wait for the StatefulSet to be Ready before running
+    # post-install hooks, so the Job polls `pg_isready` itself. The default
+    # covers a normal start; a first install with `init.restore.enabled` can take
+    # far longer (the startupProbe allows 30 min), so raise this to match the
+    # dump if the Job would otherwise give up before the restore finishes.
+    waitTimeoutSeconds: 300
+    # The wait loop above already absorbs a slow start, so retries only cover a
+    # transient psql failure.
+    backoffLimit: 3
+    # Bounds the Job across ALL attempts, not per attempt — so it has to exceed
+    # waitTimeoutSeconds, and raising one means raising the other.
+    activeDeadlineSeconds: 600
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
   # `/dev/shm`, mounted as a Memory-medium emptyDir. Kubernetes defaults it to
   # 64Mi, which is too small for parallel query: workers build hash tables in
   # shared memory (`dynamic_shared_memory_type=posix`) and when it runs out the

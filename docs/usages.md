@@ -313,7 +313,7 @@ Derivation, with `L` = `limits.memory`, `S` = `shm.size`, `C` = `limits.cpu` flo
 | `random_page_cost` | fixed — node-local SSD | `1.1` |
 | `shared_preload_libraries` | fixed | `pg_stat_statements` |
 | `track_io_timing` | fixed | `on` |
-| `log_min_duration_statement` | fixed | `500ms` |
+| `log_min_duration_statement` | fixed | `2s` |
 | `log_lock_waits` | fixed | `on` |
 | `log_temp_files` | fixed | `0` (log all) |
 | `log_autovacuum_min_duration` | fixed | `0` (log all) |
@@ -322,13 +322,13 @@ The connection budget is `L − shared_buffers − S − 64MB − (autovacuum_ma
 
 `autovacuum_work_mem` and `autovacuum_max_workers` are set explicitly rather than left alone, because Postgres defaults `autovacuum_work_mem` to `-1` — meaning "use `maintenance_work_mem`", which is sized for one-off index builds. Left at the default, three autovacuum workers could each claim `maintenance_work_mem` (102MB at a 1Gi limit) entirely outside the budget. Overriding either one in `parameters` is costed against the budget, including an explicit `-1`.
 
-`pg_stat_statements` is preloaded but the view still needs creating once per database — the chart does not run SQL against an existing cluster:
+`log_min_duration_statement` is `2s` rather than something tighter because the log line carries the **full statement text**. Django's ORM emits `SELECT` with every column named, so on a wide table a single logged query is several KB — at a few hundred milliseconds' worth of traffic that buries every other log line. `2s` keeps the log readable while still catching the queries worth chasing. Lower it per-instance via `parameters` when you are actively profiling.
 
-```sh
-kubectl exec -it tcpg-0 -- psql -U postgres -c 'CREATE EXTENSION IF NOT EXISTS pg_stat_statements;'
-```
+Note the two other paths that put statement text in the log, neither controlled by this value: `log_min_error_statement` (Postgres default `error`) logs the statement alongside any error, and `log_statement` stays at its default `none`, so ordinary DDL/DML is never logged just for executing.
 
-Set `autoTune: false` to keep Postgres' own defaults. That also disables the budget checks below, so `parameters` is then passed through unchecked.
+`pg_stat_statements` is preloaded, and the extension itself is created by the [extension-bootstrap Job](#extensions--create-extension-bootstrap) — no manual `psql` step.
+
+Set `autoTune: false` to keep Postgres' own defaults. That also disables the budget checks below, so `parameters` is then passed through unchecked. Because it drops `shared_preload_libraries` too, it is refused while `extensions` still lists `pg_stat_statements` — see below.
 
 ### `parameters` — Postgres configuration
 
@@ -351,6 +351,54 @@ Two rules the chart enforces at render time while `autoTune` is on, both fail-cl
 2. **The total must fit the memory limit:** `shared_buffers + shm.size + 64MB + max_connections × (6MB + work_mem) + autovacuum_max_workers × autovacuum_work_mem ≤ limits.memory`. Raising `work_mem` alone at 1Gi is refused, with the arithmetic in the error, because that is exactly the configuration that OOM-kills the cluster.
 
 A bad parameter name makes Postgres exit with `FATAL: unrecognized configuration parameter`. Normally that is just a crash-loop you fix by correcting the value. The one case that bites harder is a **first** install with `init.restore.enabled: true`: the bad parameter also stops the temporary server the entrypoint starts to run the restore, so PGDATA ends up initialised with no restore sentinel, and the entrypoint wrapper then refuses to start from it — recovery is a PVC delete. Cover parameter changes with a `chart/tests/tuning_test.yaml` assertion rather than finding out in-cluster.
+
+### `extensions` — `CREATE EXTENSION` bootstrap
+
+```yaml
+tcpg:
+  extensions:
+    - pg_stat_statements     # default
+  extensionBootstrap:
+    waitTimeoutSeconds: 300
+    backoffLimit: 3
+    activeDeadlineSeconds: 600
+```
+
+Each name is created in `init.database` by `chart/templates/tcpg/extension-bootstrap-job.yaml`. **The list is the sole gate** — set it to `[]` and nothing renders. The Job talks only to Postgres, never to the Kubernetes API, so unlike the credential bootstrap it needs no ServiceAccount or RBAC.
+
+Unlike the credential bootstrap, this is a **`post-install,post-upgrade`** hook, because `CREATE EXTENSION` needs a *running* server. ArgoCD converts that Helm hook to **PostSync** on its own, so — exactly as with the pre-install Jobs — the template carries no `argocd.argoproj.io/hook` annotation (an explicit one would suppress the Helm-hook path and break plain Helm and Flux), and it does carry `argocd.argoproj.io/sync-wave` because ArgoCD ignores `helm.sh/hook-weight`.
+
+| property | how |
+|---|---|
+| idempotence | `CREATE EXTENSION IF NOT EXISTS`, so re-running on every upgrade is a no-op |
+| image | reuses `tcpg.image`, whose `psql` already matches the server major version |
+| credentials | `envFrom` the Secret the pre-install hook bootstrapped — no second copy of the password |
+| readiness | Helm does **not** wait for the StatefulSet before post-install hooks, so the Job polls `pg_isready` itself up to `waitTimeoutSeconds` |
+| privilege | `CREATE EXTENSION` needs superuser, which `init.username` is by default |
+
+Two render-time validations, both fail-closed:
+
+1. **Names are restricted to `[A-Za-z0-9_]`.** They are interpolated into SQL, so anything else — including a hyphen — fails the render rather than reaching `psql`. This rules out quoting-only names like `uuid-ossp`; use `CREATE EXTENSION` by hand for those.
+2. **`pg_stat_statements` must be in the effective `shared_preload_libraries`.** Without it Postgres refuses with `pg_stat_statements must be loaded via "shared_preload_libraries"`, which would fail the hook mid-release. Listing it while `autoTune` is off, or while a `parameters.shared_preload_libraries` override drops it, is refused at render time instead.
+
+So `autoTune: false` on its own is now a render error, since it drops the preload while the default `extensions` still asks for the view. Either preload it yourself:
+
+```yaml
+tcpg:
+  autoTune: false
+  parameters:
+    shared_preload_libraries: pg_stat_statements
+```
+
+or drop the extension:
+
+```yaml
+tcpg:
+  autoTune: false
+  extensions: []
+```
+
+On a **first install with `init.restore.enabled: true`**, raise `waitTimeoutSeconds` (and `activeDeadlineSeconds` above it) to cover the restore — the `startupProbe` allows up to 30 min, and the Job otherwise gives up first and fails the release.
 
 ### `shm` — `/dev/shm` sizing
 

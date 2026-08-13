@@ -1,0 +1,244 @@
+suite: tcpg extension-bootstrap Job
+# `CREATE EXTENSION` needs a running server, so this Job is a
+# post-install/post-upgrade hook (ArgoCD: PostSync) rather than pre-install like
+# the credential bootstrap. The extension list is the sole gate, and names are
+# validated at render time because they are interpolated into SQL.
+templates:
+  - tcpg/extension-bootstrap-job.yaml
+set:
+  tcpg.enabled: true
+release:
+  name: my-release
+tests:
+  - it: renders a Job with the default pg_stat_statements extension
+    asserts:
+      - hasDocuments: { count: 1 }
+      - isKind: { of: Job }
+      - equal:
+          path: metadata.name
+          value: tcpg-extension-bootstrap
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: EXTENSIONS
+            value: "pg_stat_statements"
+
+  # --- gating ----------------------------------------------------------------
+
+  - it: renders nothing when the extension list is empty
+    set:
+      tcpg.extensions: []
+    asserts:
+      - hasDocuments: { count: 0 }
+
+  - it: renders nothing when tcpg is disabled
+    set:
+      tcpg.enabled: false
+    asserts:
+      - hasDocuments: { count: 0 }
+
+  # --- hook wiring -----------------------------------------------------------
+
+  - it: runs as a post-install/post-upgrade hook, not pre-install
+    asserts:
+      - equal:
+          path: 'metadata.annotations["helm.sh/hook"]'
+          value: post-install,post-upgrade
+      - equal:
+          path: 'metadata.annotations["helm.sh/hook-weight"]'
+          value: "0"
+      # Job specs are immutable, so the previous hook Job must go first.
+      - equal:
+          path: 'metadata.annotations["helm.sh/hook-delete-policy"]'
+          value: before-hook-creation
+
+  - it: carries argocd sync-wave, which orders PostSync where hook-weight is ignored
+    asserts:
+      - equal:
+          path: 'metadata.annotations["argocd.argoproj.io/sync-wave"]'
+          value: "0"
+
+  # An explicit ArgoCD hook would suppress the Helm-hook path and break plain
+  # Helm and Flux — ArgoCD converts the Helm hook to PostSync on its own.
+  - it: does not set an explicit argocd hook annotation
+    asserts:
+      - notExists:
+          path: 'metadata.annotations["argocd.argoproj.io/hook"]'
+
+  - it: does not stamp commonAnnotations on the hook resource
+    set:
+      tcpg.commonAnnotations:
+        app.togglecorp.com/part-of: banjo
+    asserts:
+      - notExists:
+          path: 'metadata.annotations["app.togglecorp.com/part-of"]'
+
+  # --- container wiring ------------------------------------------------------
+
+  - it: reuses the server image so psql matches the server major version
+    set:
+      tcpg.image.repository: myrepo/postgres
+      tcpg.image.tag: "18.9"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: myrepo/postgres:18.9
+
+  - it: sources the credentials from the bootstrapped pg Secret
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].envFrom
+          content:
+            secretRef:
+              name: tcpg-pg-credential
+
+  - it: honors the tcpg.secretName override
+    set:
+      tcpg.secretName: my-custom-pg-secret
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].envFrom
+          content:
+            secretRef:
+              name: my-custom-pg-secret
+
+  # readOnlyRootFilesystem is on, and psql writes .psql_history under $HOME.
+  - it: points HOME at a writable emptyDir under a read-only root filesystem
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: HOME
+            value: /tmp
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: tmp
+            mountPath: /tmp
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: tmp
+            emptyDir: {}
+
+  - it: satisfies the restricted Pod Security Standard
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.securityContext.seccompProfile.type
+          value: RuntimeDefault
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - contains:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          content: ALL
+
+  - it: exposes the readiness wait budget and bounds it by activeDeadlineSeconds
+    set:
+      tcpg.extensionBootstrap.waitTimeoutSeconds: 1800
+      tcpg.extensionBootstrap.activeDeadlineSeconds: 2400
+      tcpg.extensionBootstrap.backoffLimit: 1
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: WAIT_TIMEOUT_SECONDS
+            value: "1800"
+      - equal: { path: spec.activeDeadlineSeconds, value: 2400 }
+      - equal: { path: spec.backoffLimit, value: 1 }
+
+  - it: schedules alongside the database using the tcpg placement values
+    set:
+      tcpg.nodeSelector: { disktype: ssd }
+      tcpg.tolerations: [{ key: db, operator: Exists, effect: NoSchedule }]
+      tcpg.image.pullSecrets: [{ name: regcred }]
+    asserts:
+      - equal:
+          path: spec.template.spec.nodeSelector.disktype
+          value: ssd
+      - contains:
+          path: spec.template.spec.tolerations
+          content: { key: db, operator: Exists, effect: NoSchedule }
+      - contains:
+          path: spec.template.spec.imagePullSecrets
+          content: { name: regcred }
+
+  # --- multiple extensions ---------------------------------------------------
+
+  - it: passes several extensions as a space-separated list
+    set:
+      tcpg.extensions: [pg_stat_statements, pg_trgm, postgis]
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: EXTENSIONS
+            value: "pg_stat_statements pg_trgm postgis"
+
+  - it: renders extensions that need no preloaded library with autoTune off
+    set:
+      tcpg.autoTune: false
+      tcpg.extensions: [pg_trgm]
+    asserts:
+      - hasDocuments: { count: 1 }
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: EXTENSIONS
+            value: "pg_trgm"
+
+  # --- render-time validation (fail closed) ----------------------------------
+
+  # Names reach psql inside a SQL string, so anything outside [A-Za-z0-9_] fails
+  # the render rather than being quoted and hoped for.
+  - it: fails the render on an extension name that is not SQL-safe
+    set:
+      tcpg.extensions: ["pg_stat_statements; DROP TABLE users"]
+    asserts:
+      - failedTemplate:
+          errorMessage: 'tcpg.extensions: "pg_stat_statements; DROP TABLE users" is not a valid extension name — only letters, digits and underscore are allowed'
+
+  - it: fails the render on a hyphenated name
+    set:
+      tcpg.extensions: ["uuid-ossp"]
+    asserts:
+      - failedTemplate:
+          errorMessage: 'tcpg.extensions: "uuid-ossp" is not a valid extension name — only letters, digits and underscore are allowed'
+
+  # CREATE EXTENSION pg_stat_statements errors unless the library is preloaded,
+  # which would fail the hook mid-release. Caught at render time instead.
+  - it: fails the render when pg_stat_statements is listed but autoTune is off
+    set:
+      tcpg.autoTune: false
+    asserts:
+      - failedTemplate:
+          errorMessage: "tcpg.extensions includes pg_stat_statements, but it is not in the effective shared_preload_libraries (tcpg.autoTune is off, or parameters.shared_preload_libraries overrides it) — CREATE EXTENSION would fail. Add it to tcpg.parameters.shared_preload_libraries, or drop it from tcpg.extensions."
+
+  - it: fails the render when a shared_preload_libraries override drops pg_stat_statements
+    set:
+      tcpg.parameters:
+        shared_preload_libraries: pg_cron
+    asserts:
+      - failedTemplate:
+          errorMessage: "tcpg.extensions includes pg_stat_statements, but it is not in the effective shared_preload_libraries (tcpg.autoTune is off, or parameters.shared_preload_libraries overrides it) — CREATE EXTENSION would fail. Add it to tcpg.parameters.shared_preload_libraries, or drop it from tcpg.extensions."
+
+  - it: accepts a shared_preload_libraries override that keeps pg_stat_statements
+    set:
+      tcpg.parameters:
+        shared_preload_libraries: "pg_cron, pg_stat_statements"
+    asserts:
+      - hasDocuments: { count: 1 }
+
+  - it: accepts pg_stat_statements with autoTune off when the override preloads it
+    set:
+      tcpg.autoTune: false
+      tcpg.parameters:
+        shared_preload_libraries: pg_stat_statements
+    asserts:
+      - hasDocuments: { count: 1 }
