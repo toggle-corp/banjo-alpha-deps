@@ -12,6 +12,11 @@ repos:
         # Helm templates contain Go templating, not valid YAML.
         exclude: ^(chart/templates/|chart/charts/)
 
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
   - repo: local
     hooks:
       - id: helm-lint
