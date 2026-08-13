@@ -1,0 +1,142 @@
+{{- if .Values.mailpit.enabled }}
+{{- $auth := include "mailpit.authSource" . | fromYaml }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ template "mailpit.fullname" . }}
+  labels:
+    {{- include "mailpit.labels" . | nindent 4 }}
+  {{- with .Values.mailpit.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: 1
+  # Recreate, not RollingUpdate: the data PVC is ReadWriteOnce, so a second pod
+  # would block on the volume — and two Mailpits must never open one SQLite
+  # database at the same time.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "mailpit.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mailpit.podLabels" . | nindent 8 }}
+      {{- if .Values.mailpit.ui.auth.htpasswd }}
+      annotations:
+        checksum/ui-auth: {{ include (print $.Template.BasePath "/mailpit/secret-ui-auth.yaml") . | sha256sum }}
+      {{- end }}
+    spec:
+      {{- with .Values.mailpit.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.mailpit.podSecurityContext | nindent 8 }}
+      containers:
+        - name: mailpit
+          image: "{{ .Values.mailpit.image.repository }}:{{ .Values.mailpit.image.tag }}"
+          imagePullPolicy: {{ .Values.mailpit.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.mailpit.containerSecurityContext | nindent 12 }}
+          ports:
+            # Mailpit's own defaults; the Service maps `service.*Port` onto these.
+            - name: smtp
+              containerPort: 1025
+              protocol: TCP
+            - name: http
+              containerPort: 8025
+              protocol: TCP
+          env:
+            {{- /*
+            Both flags or neither: Mailpit refuses to start (exit 1,
+            "authentication requires STARTTLS or TLS encryption") if
+            accept-any is set without allow-insecure.
+            */}}
+            {{- if .Values.mailpit.smtp.acceptAnyAuth }}
+            - name: MP_SMTP_AUTH_ACCEPT_ANY
+              value: "true"
+            - name: MP_SMTP_AUTH_ALLOW_INSECURE
+              value: "true"
+            {{- end }}
+            - name: MP_MAX_MESSAGES
+              value: {{ .Values.mailpit.retention.maxMessages | quote }}
+            {{- with .Values.mailpit.retention.maxAge }}
+            - name: MP_MAX_AGE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.mailpit.label }}
+            - name: MP_LABEL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.mailpit.persistence.enabled }}
+            - name: MP_DATABASE
+              value: {{ include "mailpit.databasePath" . }}
+            {{- end }}
+            {{- if $auth.name }}
+            - name: MP_UI_AUTH_FILE
+              value: {{ printf "%s/%s" (include "mailpit.authMountPath" .) $auth.key }}
+            {{- end }}
+          # /livez and /readyz are exempt from MP_UI_AUTH_FILE, so these keep
+          # working with the UI locked down.
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          {{- with .Values.mailpit.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if or .Values.mailpit.persistence.enabled $auth.name }}
+          volumeMounts:
+            {{- if .Values.mailpit.persistence.enabled }}
+            - name: data
+              mountPath: {{ include "mailpit.dataDir" . }}
+            {{- end }}
+            {{- if $auth.name }}
+            - name: ui-auth
+              mountPath: {{ include "mailpit.authMountPath" . }}
+              readOnly: true
+            {{- end }}
+          {{- end }}
+      {{- with .Values.mailpit.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.mailpit.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.mailpit.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if or .Values.mailpit.persistence.enabled $auth.name }}
+      volumes:
+        {{- if .Values.mailpit.persistence.enabled }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ template "mailpit.fullname" . }}-data
+        {{- end }}
+        {{- if $auth.name }}
+        - name: ui-auth
+          secret:
+            secretName: {{ $auth.name }}
+            items:
+              - key: {{ $auth.key }}
+                path: {{ $auth.key }}
+        {{- end }}
+      {{- end }}
+{{- end }}

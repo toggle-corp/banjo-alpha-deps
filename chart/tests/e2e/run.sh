@@ -161,9 +161,16 @@ for kv in "max_connections|43" "effective_cache_size|63488" "autovacuum_work_mem
 done
 pass params "post-review values in effect (max_connections=43, autovacuum budgeted)"
 
-psql_q "CREATE EXTENSION IF NOT EXISTS pg_stat_statements" >/dev/null
+# The post-install hook Job creates the extension, so it must already be there
+# — no CREATE EXTENSION here, or the check would pass whether the hook ran or not.
+have_ext=$(psql_q "SELECT count(*) FROM pg_extension WHERE extname='pg_stat_statements'" | tr -d ' \r')
+[ "$have_ext" = "1" ] || die observability "extension-bootstrap hook did not create pg_stat_statements"
 psql_q "SELECT count(*) FROM pg_stat_statements" >/dev/null
-pass observability "pg_stat_statements preloaded and usable"
+pass observability "pg_stat_statements preloaded and created by the extension-bootstrap hook"
+
+job_status=$(k get job tcpg-extension-bootstrap -o jsonpath='{.status.succeeded}' 2>/dev/null | tr -d ' \r')
+[ "$job_status" = "1" ] || die observability "tcpg-extension-bootstrap Job did not succeed (succeeded=${job_status:-none})"
+pass observability "extension-bootstrap Job completed as a post-install hook"
 
 # ---------------------------------------------------------------------------
 # Phase 3 — /dev/shm is real, sized and enforced
@@ -551,30 +558,34 @@ done
 pass guards "budget, autovacuum and unit guards all reject at install time"
 
 # ---------------------------------------------------------------------------
-# Phase 9 — mailhog catches SMTP, guards the UI, and survives a restart
+# Phase 9 — mailpit catches SMTP, guards the UI, and survives a restart
 # ---------------------------------------------------------------------------
-# bcrypt of "hunter2", minted with `docker run --rm mailhog/mailhog:v1.0.1
-# bcrypt hunter2`. A fixture, not a credential — the chart never generates one
-# (a fresh salt per render would leave an ArgoCD app permanently OutOfSync).
+# bcrypt of "hunter2", minted with `htpasswd -nbB admin hunter2`. A fixture, not
+# a credential — the chart never generates one (a fresh salt per render would
+# leave an ArgoCD app permanently OutOfSync).
 # shellcheck disable=SC2016  # the $2a$/$04$ are bcrypt field separators, not shell
-MH_HTPASSWD='admin:$2a$04$/eeOOFDbquieypRZZV7VMeha9EiiZ8kOy1Z4LuOjE22xwm7nINRkG'
+MP_HTPASSWD='admin:$2a$04$/eeOOFDbquieypRZZV7VMeha9EiiZ8kOy1Z4LuOjE22xwm7nINRkG'
 
-echo "==> [mailhog] installing with maildir persistence and UI auth..."
-helm install mailhog-check "$CHART_DIR" -n "$NS" --set mailhog.enabled=true \
-  --set mailhog.persistence.enabled=true \
-  --set "mailhog.ui.auth.htpasswd=$MH_HTPASSWD" \
-  --wait --timeout 5m >"$TMPDIR/mailhog.log" 2>&1 \
-  || { echo "FAIL [mailhog]: helm install failed" >&2; tail -30 "$TMPDIR/mailhog.log" >&2
+echo "==> [mailpit] installing with SQLite persistence and UI auth..."
+helm install mailpit-check "$CHART_DIR" -n "$NS" --set mailpit.enabled=true \
+  --set mailpit.persistence.enabled=true \
+  --set "mailpit.ui.auth.htpasswd=$MP_HTPASSWD" \
+  --wait --timeout 5m >"$TMPDIR/mailpit.log" 2>&1 \
+  || { echo "FAIL [mailpit]: helm install failed" >&2; tail -30 "$TMPDIR/mailpit.log" >&2
        k get events --sort-by=.lastTimestamp 2>&1 | tail -20 >&2; exit 1; }
-pass mailhog "admitted under restricted PSS with readOnlyRootFilesystem and reached Ready"
+# The image declares no USER, so this also proves podSecurityContext is what
+# keeps it off root. --wait only returns once the /readyz probe passes, which is
+# itself the check that MP_SMTP_AUTH_ALLOW_INSECURE accompanied accept-any:
+# without it Mailpit exits 1 at startup and the rollout never completes.
+pass mailpit "admitted under restricted PSS as non-root, readOnlyRootFilesystem, /readyz green"
 
 # The client reads the connection details out of the chart's own consumer
 # Secret, so a wrong host/port there fails this phase rather than passing
 # quietly.
-mh_host=$(k get secret mailhog-smtp-config -o jsonpath='{.data.SMTP_HOST}' | base64 -d)
-mh_port=$(k get secret mailhog-smtp-config -o jsonpath='{.data.SMTP_PORT}' | base64 -d)
-[ "$mh_host" = "mailhog.$NS.svc.cluster.local" ] \
-  || die mailhog "SMTP_HOST is '$mh_host', expected mailhog.$NS.svc.cluster.local"
+mp_host=$(k get secret mailpit-smtp-config -o jsonpath='{.data.SMTP_HOST}' | base64 -d)
+mp_port=$(k get secret mailpit-smtp-config -o jsonpath='{.data.SMTP_PORT}' | base64 -d)
+[ "$mp_host" = "mailpit.$NS.svc.cluster.local" ] \
+  || die mailpit "SMTP_HOST is '$mp_host', expected mailpit.$NS.svc.cluster.local"
 
 kubectl apply -n "$NS" -f - >/dev/null <<EOF
 apiVersion: v1
@@ -585,32 +596,42 @@ data:
   client.py: |
     import base64, json, os, smtplib, sys, urllib.error, urllib.request
     from email.message import EmailMessage
-    host, smtp_port = os.environ["MH_HOST"], int(os.environ["MH_SMTP_PORT"])
-    api = "http://%s:8025/api/v2/messages" % host
+    host, smtp_port = os.environ["MP_HOST"], int(os.environ["MP_SMTP_PORT"])
+    base = "http://%s:8025" % host
 
-    def get(authenticated):
-        req = urllib.request.Request(api)
+    def get(path, authenticated):
+        req = urllib.request.Request(base + path)
         if authenticated:
             req.add_header("Authorization", "Basic " + base64.b64encode(b"admin:hunter2").decode())
         try:
             with urllib.request.urlopen(req, timeout=10) as r:
-                return r.status, json.load(r)
+                return r.status, r.read()
         except urllib.error.HTTPError as e:
             return e.code, None
 
     if sys.argv[1] == "send":
+        s = smtplib.SMTP(host, smtp_port, timeout=10)
+        s.ehlo()
+        # acceptAnyAuth must make Mailpit advertise AUTH, else a Django-style
+        # client that always logs in dies with SMTPNotSupportedError.
+        assert s.has_extn("auth"), "server does not advertise AUTH"
+        s.login("test@example.com", "test")
         m = EmailMessage()
         m["From"], m["To"], m["Subject"] = "app@alpha.test", "user@example.com", "e2e"
         m.set_content("hello from e2e")
-        s = smtplib.SMTP(host, smtp_port, timeout=10)
         s.send_message(m)
         s.quit()
 
-    code, _ = get(False)
+    # /livez and /readyz must stay reachable WITHOUT credentials even though the
+    # UI is locked down — the probes and the health-check annotation rely on it.
+    for path in ("/livez", "/readyz"):
+        code, _ = get(path, False)
+        assert code == 200, "%s returned %s anonymously, expected 200" % (path, code)
+    code, _ = get("/api/v1/messages", False)
     assert code == 401, "unauthenticated API returned %s, expected 401" % code
-    code, body = get(True)
+    code, body = get("/api/v1/messages", True)
     assert code == 200, "authenticated API returned %s, expected 200" % code
-    print(body["total"])
+    print(json.loads(body)["messages_count"])
 ---
 apiVersion: v1
 kind: Pod
@@ -626,8 +647,8 @@ spec:
       image: python:3.13-alpine
       command: [sleep, infinity]
       env:
-        - {name: MH_HOST, value: "$mh_host"}
-        - {name: MH_SMTP_PORT, value: "$mh_port"}
+        - {name: MP_HOST, value: "$mp_host"}
+        - {name: MP_SMTP_PORT, value: "$mp_port"}
       securityContext:
         allowPrivilegeEscalation: false
         readOnlyRootFilesystem: true
@@ -639,25 +660,25 @@ spec:
       configMap: {name: mailclient}
 EOF
 k wait --for=condition=ready pod/mailclient --timeout=180s >/dev/null \
-  || die mailhog "mail client pod never became ready"
+  || die mailpit "mail client pod never became ready"
 
 total=$(k exec mailclient -- python3 /app/client.py send 2>&1 | tail -1 | tr -d ' \r') \
-  || die mailhog "client failed: $total"
-[ "$total" = "1" ] || die mailhog "expected 1 caught message, API reported '$total'"
-pass mailhog "SMTP on :$mh_port caught the message; UI/API answers 401 without the MH_AUTH_FILE credentials"
+  || die mailpit "client failed: $total"
+[ "$total" = "1" ] || die mailpit "expected 1 caught message, API reported '$total'"
+pass mailpit "SMTP AUTH accepted on :$mp_port; API 401s anonymously while /livez and /readyz stay open"
 
-# maildir lives on the PVC, so the inbox must outlive the pod. This also proves
-# fsGroup 1000 makes the volume writable for the non-root mailhog user.
-k delete pod -l app.kubernetes.io/name=mailhog --wait >/dev/null
-k rollout status deployment mailhog --timeout=180s >/dev/null \
-  || die mailhog "mailhog never came back after the pod delete"
+# The SQLite database lives on the PVC, so the inbox must outlive the pod. This
+# also proves fsGroup 1000 makes the volume writable for the non-root user.
+k delete pod -l app.kubernetes.io/name=mailpit --wait >/dev/null
+k rollout status deployment mailpit --timeout=180s >/dev/null \
+  || die mailpit "mailpit never came back after the pod delete"
 total=$(k exec mailclient -- python3 /app/client.py check 2>&1 | tail -1 | tr -d ' \r') \
-  || die mailhog "client failed after restart: $total"
-[ "$total" = "1" ] || die mailhog "maildir did not survive the restart (API reported '$total')"
-pass mailhog "maildir on the PVC survived a pod delete"
+  || die mailpit "client failed after restart: $total"
+[ "$total" = "1" ] || die mailpit "the database did not survive the restart (API reported '$total')"
+pass mailpit "SQLite database on the PVC survived a pod delete"
 
 k delete pod mailclient --wait=false >/dev/null 2>&1 || true
-helm uninstall mailhog-check -n "$NS" >/dev/null 2>&1 || true
+helm uninstall mailpit-check -n "$NS" >/dev/null 2>&1 || true
 
 echo
 echo "All e2e tests passed."

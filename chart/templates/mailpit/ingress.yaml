@@ -1,15 +1,15 @@
-{{- if and .Values.mailhog.enabled .Values.mailhog.ui.ingress.enabled }}
-{{- $ing := .Values.mailhog.ui.ingress }}
+{{- if and .Values.mailpit.enabled .Values.mailpit.ui.ingress.enabled }}
+{{- $ing := .Values.mailpit.ui.ingress }}
 {{- if not $ing.hostname }}
-{{- fail "mailhog.ui.ingress.hostname is required when mailhog.ui.ingress.enabled is true" }}
+{{- fail "mailpit.ui.ingress.hostname is required when mailpit.ui.ingress.enabled is true" }}
 {{- end }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: {{ template "mailhog.fullname" . }}
+  name: {{ template "mailpit.fullname" . }}
   labels:
-    {{- include "mailhog.labels" . | nindent 4 }}
-  {{- $annotations := merge (deepCopy (default dict $ing.annotations)) (default dict .Values.mailhog.commonAnnotations) }}
+    {{- include "mailpit.labels" . | nindent 4 }}
+  {{- $annotations := merge (deepCopy (default dict $ing.annotations)) (default dict .Values.mailpit.commonAnnotations) }}
   {{- with $annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
@@ -26,9 +26,9 @@ spec:
             pathType: {{ $ing.pathType }}
             backend:
               service:
-                name: {{ template "mailhog.fullname" . }}
+                name: {{ template "mailpit.fullname" . }}
                 port:
-                  number: {{ .Values.mailhog.service.httpPort }}
+                  number: {{ .Values.mailpit.service.httpPort }}
   {{- with $ing.tls }}
   tls:
     {{- toYaml . | nindent 4 }}

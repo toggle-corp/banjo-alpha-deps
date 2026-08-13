@@ -1,0 +1,690 @@
+suite: mailpit
+# Per-instance SMTP catcher: Deployment + Service + optional data PVC, UI
+# ingress and MP_UI_AUTH_FILE basic auth, plus the consumer-facing
+# mailpit-smtp-config Secret the app binds via envFrom.
+templates:
+  - templates/mailpit/deployment.yaml
+  - templates/mailpit/service.yaml
+  - templates/mailpit/pvc.yaml
+  - templates/mailpit/ingress.yaml
+  - templates/mailpit/secret.yaml
+  - templates/mailpit/secret-ui-auth.yaml
+release:
+  name: my-release
+  namespace: alpha-3
+tests:
+  - it: renders nothing at all by default (opt-in)
+    asserts:
+      - hasDocuments: { count: 0 }
+
+  - it: renders only the Deployment, Service and SMTP Secret when enabled
+    set:
+      mailpit.enabled: true
+    asserts:
+      - hasDocuments: { count: 1 }
+        template: templates/mailpit/deployment.yaml
+      - hasDocuments: { count: 1 }
+        template: templates/mailpit/service.yaml
+      - hasDocuments: { count: 1 }
+        template: templates/mailpit/secret.yaml
+      - hasDocuments: { count: 0 }
+        template: templates/mailpit/pvc.yaml
+      - hasDocuments: { count: 0 }
+        template: templates/mailpit/ingress.yaml
+      - hasDocuments: { count: 0 }
+        template: templates/mailpit/secret-ui-auth.yaml
+
+  - it: uses the fixed name mailpit, not <release>-mailpit
+    set:
+      mailpit.enabled: true
+    asserts:
+      - equal:
+          path: metadata.name
+          value: mailpit
+        template: templates/mailpit/deployment.yaml
+      - equal:
+          path: metadata.name
+          value: mailpit
+        template: templates/mailpit/service.yaml
+
+  - it: falls back to <release>-mailpit when the fullnameOverride is cleared
+    set:
+      mailpit.enabled: true
+      mailpit.fullnameOverride: ""
+    asserts:
+      - equal:
+          path: metadata.name
+          value: my-release-mailpit
+        template: templates/mailpit/service.yaml
+
+  # --- Service -------------------------------------------------------------
+
+  - it: exposes SMTP and the web UI on one ClusterIP Service
+    set:
+      mailpit.enabled: true
+    asserts:
+      - equal:
+          path: spec.type
+          value: ClusterIP
+        template: templates/mailpit/service.yaml
+      - contains:
+          path: spec.ports
+          content: { port: 1025, targetPort: smtp, protocol: TCP, name: smtp }
+        template: templates/mailpit/service.yaml
+      - contains:
+          path: spec.ports
+          content: { port: 8025, targetPort: http, protocol: TCP, name: http }
+        template: templates/mailpit/service.yaml
+
+  - it: remaps the Service ports without touching the container ports
+    # Mailpit binds 1025/8025 itself; only the Service side is configurable.
+    set:
+      mailpit.enabled: true
+      mailpit.service.smtpPort: 25
+      mailpit.service.httpPort: 80
+    asserts:
+      - equal:
+          path: spec.ports[0].port
+          value: 25
+        template: templates/mailpit/service.yaml
+      - equal:
+          path: spec.ports[1].port
+          value: 80
+        template: templates/mailpit/service.yaml
+      - equal:
+          path: spec.template.spec.containers[0].ports[0].containerPort
+          value: 1025
+        template: templates/mailpit/deployment.yaml
+      - equal:
+          path: spec.template.spec.containers[0].ports[1].containerPort
+          value: 8025
+        template: templates/mailpit/deployment.yaml
+
+  # --- consumer Secret -----------------------------------------------------
+
+  - it: publishes in-cluster SMTP settings for the app to envFrom
+    set:
+      mailpit.enabled: true
+    asserts:
+      - equal:
+          path: metadata.name
+          value: mailpit-smtp-config
+        template: templates/mailpit/secret.yaml
+      - equal:
+          path: stringData.SMTP_HOST
+          value: mailpit.alpha-3.svc.cluster.local
+        template: templates/mailpit/secret.yaml
+      - equal:
+          path: stringData.SMTP_PORT
+          value: "1025"
+        template: templates/mailpit/secret.yaml
+      - equal:
+          path: stringData.SMTP_URL
+          value: smtp://mailpit.alpha-3.svc.cluster.local:1025
+        template: templates/mailpit/secret.yaml
+      - equal:
+          path: stringData.SMTP_USE_TLS
+          value: "false"
+        template: templates/mailpit/secret.yaml
+
+  - it: tracks a remapped SMTP Service port in the consumer Secret
+    set:
+      mailpit.enabled: true
+      mailpit.service.smtpPort: 2525
+    asserts:
+      - equal:
+          path: stringData.SMTP_PORT
+          value: "2525"
+        template: templates/mailpit/secret.yaml
+      - equal:
+          path: stringData.SMTP_URL
+          value: smtp://mailpit.alpha-3.svc.cluster.local:2525
+        template: templates/mailpit/secret.yaml
+
+  - it: honours a secretName override
+    set:
+      mailpit.enabled: true
+      mailpit.secretName: my-smtp
+    asserts:
+      - equal:
+          path: metadata.name
+          value: my-smtp
+        template: templates/mailpit/secret.yaml
+
+  # --- SMTP auth -----------------------------------------------------------
+
+  - it: accepts any SMTP credentials by default, with the insecure flag it requires
+    # Mailpit exits 1 at startup if accept-any is set without allow-insecure, and
+    # stock Mailpit advertises no AUTH at all — which breaks any client that logs
+    # in unconditionally (Django does whenever EMAIL_HOST_USER is set).
+    set:
+      mailpit.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: MP_SMTP_AUTH_ACCEPT_ANY, value: "true" }
+        template: templates/mailpit/deployment.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: MP_SMTP_AUTH_ALLOW_INSECURE, value: "true" }
+        template: templates/mailpit/deployment.yaml
+
+  - it: drops both SMTP auth flags together when acceptAnyAuth is off
+    set:
+      mailpit.enabled: true
+      mailpit.smtp.acceptAnyAuth: false
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: { name: MP_SMTP_AUTH_ACCEPT_ANY, value: "true" }
+        template: templates/mailpit/deployment.yaml
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: { name: MP_SMTP_AUTH_ALLOW_INSECURE, value: "true" }
+        template: templates/mailpit/deployment.yaml
+
+  # --- retention -----------------------------------------------------------
+
+  - it: caps the stored message count by default
+    set:
+      mailpit.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: MP_MAX_MESSAGES, value: "500" }
+        template: templates/mailpit/deployment.yaml
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: { name: MP_MAX_AGE, value: "24h" }
+        template: templates/mailpit/deployment.yaml
+
+  - it: adds age-based pruning when maxAge is set
+    set:
+      mailpit.enabled: true
+      mailpit.retention.maxMessages: 2000
+      mailpit.retention.maxAge: 7d
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: MP_MAX_MESSAGES, value: "2000" }
+        template: templates/mailpit/deployment.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: MP_MAX_AGE, value: "7d" }
+        template: templates/mailpit/deployment.yaml
+
+  # --- storage -------------------------------------------------------------
+
+  - it: keeps the database off disk and mounts no volumes by default
+    set:
+      mailpit.enabled: true
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: { name: MP_DATABASE, value: /data/mailpit.db }
+        template: templates/mailpit/deployment.yaml
+      - notExists:
+          path: spec.template.spec.volumes
+        template: templates/mailpit/deployment.yaml
+      - notExists:
+          path: spec.template.spec.containers[0].volumeMounts
+        template: templates/mailpit/deployment.yaml
+
+  - it: puts the SQLite database on a PVC when persistence is enabled
+    set:
+      mailpit.enabled: true
+      mailpit.persistence.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: MP_DATABASE, value: /data/mailpit.db }
+        template: templates/mailpit/deployment.yaml
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content: { name: data, mountPath: /data }
+        template: templates/mailpit/deployment.yaml
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: data
+            persistentVolumeClaim:
+              claimName: mailpit-data
+        template: templates/mailpit/deployment.yaml
+      - equal:
+          path: metadata.name
+          value: mailpit-data
+        template: templates/mailpit/pvc.yaml
+      - equal:
+          path: spec.storageClassName
+          value: local-path
+        template: templates/mailpit/pvc.yaml
+      - equal:
+          path: spec.accessModes[0]
+          value: ReadWriteOnce
+        template: templates/mailpit/pvc.yaml
+
+  - it: uses Recreate so two Mailpits never open one SQLite database
+    set:
+      mailpit.enabled: true
+      mailpit.persistence.enabled: true
+    asserts:
+      - equal:
+          path: spec.strategy.type
+          value: Recreate
+        template: templates/mailpit/deployment.yaml
+
+  # --- UI auth -------------------------------------------------------------
+
+  - it: leaves the UI unauthenticated when no auth is configured
+    set:
+      mailpit.enabled: true
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: { name: MP_UI_AUTH_FILE, value: /etc/mailpit/auth/MP_UI_AUTH_FILE }
+        template: templates/mailpit/deployment.yaml
+
+  - it: renders an inline htpasswd into a chart-managed Secret and mounts it
+    set:
+      mailpit.enabled: true
+      mailpit.ui.auth.htpasswd: "admin:$2y$05$abcdefghijklmnopqrstuv"
+    asserts:
+      - equal:
+          path: metadata.name
+          value: mailpit-ui-auth
+        template: templates/mailpit/secret-ui-auth.yaml
+      - matchRegex:
+          path: stringData.MP_UI_AUTH_FILE
+          pattern: ^admin:\$2y\$05\$abcdefghijklmnopqrstuv\n?$
+        template: templates/mailpit/secret-ui-auth.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: MP_UI_AUTH_FILE, value: /etc/mailpit/auth/MP_UI_AUTH_FILE }
+        template: templates/mailpit/deployment.yaml
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: ui-auth
+            secret:
+              secretName: mailpit-ui-auth
+              items:
+                - key: MP_UI_AUTH_FILE
+                  path: MP_UI_AUTH_FILE
+        template: templates/mailpit/deployment.yaml
+      - exists:
+          path: spec.template.metadata.annotations["checksum/ui-auth"]
+        template: templates/mailpit/deployment.yaml
+
+  - it: mounts an externally-managed auth Secret and renders no Secret of its own
+    set:
+      mailpit.enabled: true
+      mailpit.ui.auth.existingSecret.name: mailpit-auth
+      mailpit.ui.auth.existingSecret.key: auth-file
+    asserts:
+      - hasDocuments: { count: 0 }
+        template: templates/mailpit/secret-ui-auth.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: MP_UI_AUTH_FILE, value: /etc/mailpit/auth/auth-file }
+        template: templates/mailpit/deployment.yaml
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: ui-auth
+            secret:
+              secretName: mailpit-auth
+              items:
+                - key: auth-file
+                  path: auth-file
+        template: templates/mailpit/deployment.yaml
+      - notExists:
+          path: spec.template.metadata.annotations["checksum/ui-auth"]
+        template: templates/mailpit/deployment.yaml
+
+  - it: refuses both inline and external auth sources
+    set:
+      mailpit.enabled: true
+      mailpit.ui.auth.htpasswd: "admin:$2y$05$abc"
+      mailpit.ui.auth.existingSecret.name: mailpit-auth
+      mailpit.ui.auth.existingSecret.key: auth-file
+    asserts:
+      - failedTemplate:
+          errorMessage: "Set either mailpit.ui.auth.htpasswd (inline) or mailpit.ui.auth.existingSecret.name (external), not both"
+        template: templates/mailpit/deployment.yaml
+
+  - it: requires existingSecret.key alongside existingSecret.name
+    set:
+      mailpit.enabled: true
+      mailpit.ui.auth.existingSecret.name: mailpit-auth
+    asserts:
+      - failedTemplate:
+          errorMessage: "mailpit.ui.auth.existingSecret.key is required when existingSecret.name is set"
+        template: templates/mailpit/deployment.yaml
+
+  # --- probes --------------------------------------------------------------
+
+  - it: probes /livez and /readyz over HTTP even with the UI locked down
+    # Mailpit exempts both from MP_UI_AUTH_FILE, so unlike MailHog (where auth
+    # returned 401 on every path and forced tcpSocket probes) these are real
+    # HTTP health checks.
+    set:
+      mailpit.enabled: true
+      mailpit.ui.auth.htpasswd: "admin:$2y$05$abc"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.path
+          value: /livez
+        template: templates/mailpit/deployment.yaml
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.port
+          value: http
+        template: templates/mailpit/deployment.yaml
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.path
+          value: /readyz
+        template: templates/mailpit/deployment.yaml
+
+  # --- ingress -------------------------------------------------------------
+
+  - it: renders the UI ingress against the http Service port
+    set:
+      mailpit.enabled: true
+      mailpit.ui.ingress.enabled: true
+      mailpit.ui.ingress.hostname: mail.example.com
+    asserts:
+      - hasDocuments: { count: 1 }
+        template: templates/mailpit/ingress.yaml
+      - equal:
+          path: spec.ingressClassName
+          value: traefik
+        template: templates/mailpit/ingress.yaml
+      - equal:
+          path: spec.rules[0].host
+          value: mail.example.com
+        template: templates/mailpit/ingress.yaml
+      - equal:
+          path: spec.rules[0].http.paths[0].backend.service.name
+          value: mailpit
+        template: templates/mailpit/ingress.yaml
+      - equal:
+          path: spec.rules[0].http.paths[0].backend.service.port.number
+          value: 8025
+        template: templates/mailpit/ingress.yaml
+      - notExists:
+          path: spec.tls
+        template: templates/mailpit/ingress.yaml
+
+  - it: annotates the UI ingress with the chart-fixed health-check path
+    set:
+      mailpit.enabled: true
+      mailpit.ui.ingress.enabled: true
+      mailpit.ui.ingress.hostname: mail.example.com
+    asserts:
+      # /livez is exempt from UI auth, so an external monitor gets a real 200
+      # without credentials.
+      - equal:
+          path: metadata.annotations["app.togglecorp.com/health-check"]
+          value: /livez
+        template: templates/mailpit/ingress.yaml
+
+  - it: keeps the health-check alongside operator-supplied ingress annotations
+    set:
+      mailpit.enabled: true
+      mailpit.ui.ingress.enabled: true
+      mailpit.ui.ingress.hostname: mail.example.com
+      mailpit.ui.ingress.annotations:
+        traefik.ingress.kubernetes.io/router.middlewares: alpha-3-basic-auth@kubernetescrd
+    asserts:
+      - equal:
+          path: metadata.annotations["app.togglecorp.com/health-check"]
+          value: /livez
+        template: templates/mailpit/ingress.yaml
+      - equal:
+          path: metadata.annotations["traefik.ingress.kubernetes.io/router.middlewares"]
+          value: alpha-3-basic-auth@kubernetescrd
+        template: templates/mailpit/ingress.yaml
+
+  - it: does not leak the health-check annotation onto non-ingress resources
+    set:
+      mailpit.enabled: true
+      mailpit.ui.ingress.enabled: true
+      mailpit.ui.ingress.hostname: mail.example.com
+    asserts:
+      - notExists:
+          path: metadata.annotations["app.togglecorp.com/health-check"]
+        template: templates/mailpit/service.yaml
+      - notExists:
+          path: metadata.annotations["app.togglecorp.com/health-check"]
+        template: templates/mailpit/deployment.yaml
+
+  - it: fails closed when the ingress is enabled without a hostname
+    set:
+      mailpit.enabled: true
+      mailpit.ui.ingress.enabled: true
+    asserts:
+      - failedTemplate:
+          errorMessage: "mailpit.ui.ingress.hostname is required when mailpit.ui.ingress.enabled is true"
+        template: templates/mailpit/ingress.yaml
+
+  - it: passes spec.tls through verbatim
+    set:
+      mailpit.enabled: true
+      mailpit.ui.ingress.enabled: true
+      mailpit.ui.ingress.hostname: mail.example.com
+      mailpit.ui.ingress.tls:
+        - hosts: [mail.example.com]
+          secretName: mail-tls
+    asserts:
+      - equal:
+          path: spec.tls[0].secretName
+          value: mail-tls
+        template: templates/mailpit/ingress.yaml
+
+  - it: merges commonAnnotations with the ingress' own, the specific one winning
+    set:
+      mailpit.enabled: true
+      mailpit.ui.ingress.enabled: true
+      mailpit.ui.ingress.hostname: mail.example.com
+      mailpit.commonAnnotations:
+        argocd.argoproj.io/sync-wave: "-1"
+        shared: from-common
+      mailpit.ui.ingress.annotations:
+        shared: from-ingress
+    asserts:
+      - equal:
+          path: metadata.annotations["argocd.argoproj.io/sync-wave"]
+          value: "-1"
+        template: templates/mailpit/ingress.yaml
+      - equal:
+          path: metadata.annotations.shared
+          value: from-ingress
+        template: templates/mailpit/ingress.yaml
+
+  # --- labels, annotations, hardening --------------------------------------
+
+  - it: labels every resource component=resources for the deployment-metadata standard
+    set:
+      mailpit.enabled: true
+      mailpit.persistence.enabled: true
+      mailpit.ui.ingress.enabled: true
+      mailpit.ui.ingress.hostname: mail.example.com
+    asserts:
+      - equal:
+          path: metadata.labels["app.togglecorp.com/component"]
+          value: resources
+        template: templates/mailpit/ingress.yaml
+      - equal:
+          path: metadata.labels["app.togglecorp.com/component"]
+          value: resources
+        template: templates/mailpit/deployment.yaml
+      - equal:
+          path: metadata.labels["app.togglecorp.com/component"]
+          value: resources
+        template: templates/mailpit/pvc.yaml
+      - equal:
+          path: metadata.labels["app.kubernetes.io/component"]
+          value: mail-catcher
+        template: templates/mailpit/service.yaml
+
+  - it: deep-merges the deploy layer's taxonomy with the chart's component label
+    set:
+      mailpit.enabled: true
+      mailpit.commonLabels:
+        app.togglecorp.com/part-of: Mapswipe
+        app.togglecorp.com/instance: "1"
+    asserts:
+      - equal:
+          path: metadata.labels["app.togglecorp.com/part-of"]
+          value: Mapswipe
+        template: templates/mailpit/deployment.yaml
+      - equal:
+          path: metadata.labels["app.togglecorp.com/instance"]
+          value: "1"
+        template: templates/mailpit/deployment.yaml
+      - equal:
+          path: metadata.labels["app.kubernetes.io/component"]
+          value: mail-catcher
+        template: templates/mailpit/deployment.yaml
+
+  - it: quotes a numeric commonLabel value instead of emitting a bare number
+    # The deploy layer substitutes __BANJO_INSTANCE_ID__ textually, so an instance
+    # id can reach the chart as the number 11. A bare number is not a legal label
+    # value — the API server rejects the object with "got number, want string".
+    set:
+      mailpit.enabled: true
+      mailpit.persistence.enabled: true
+      mailpit.commonLabels:
+        app.togglecorp.com/instance: 11
+    asserts:
+      - equal:
+          path: metadata.labels["app.togglecorp.com/instance"]
+          value: "11"
+        template: templates/mailpit/deployment.yaml
+      - equal:
+          path: spec.template.metadata.labels["app.togglecorp.com/instance"]
+          value: "11"
+        template: templates/mailpit/deployment.yaml
+      - equal:
+          path: metadata.labels["app.togglecorp.com/instance"]
+          value: "11"
+        template: templates/mailpit/service.yaml
+      - equal:
+          path: metadata.labels["app.togglecorp.com/instance"]
+          value: "11"
+        template: templates/mailpit/pvc.yaml
+
+  - it: keeps commonLabels out of the immutable selector
+    set:
+      mailpit.enabled: true
+      mailpit.commonLabels:
+        app.togglecorp.com/part-of: Mapswipe
+    asserts:
+      - notExists:
+          path: spec.selector.matchLabels["app.togglecorp.com/part-of"]
+        template: templates/mailpit/deployment.yaml
+      - equal:
+          path: spec.selector.matchLabels
+          value:
+            app.kubernetes.io/name: mailpit
+            app.kubernetes.io/instance: my-release
+        template: templates/mailpit/deployment.yaml
+
+  - it: keeps the chart version off the pod template so a bump does not roll it
+    set:
+      mailpit.enabled: true
+    asserts:
+      - notExists:
+          path: spec.template.metadata.labels["helm.sh/chart"]
+        template: templates/mailpit/deployment.yaml
+
+  - it: applies commonAnnotations to every resource
+    set:
+      mailpit.enabled: true
+      mailpit.persistence.enabled: true
+      mailpit.commonAnnotations:
+        argocd.argoproj.io/sync-wave: "-1"
+    asserts:
+      - equal:
+          path: metadata.annotations["argocd.argoproj.io/sync-wave"]
+          value: "-1"
+        template: templates/mailpit/deployment.yaml
+      - equal:
+          path: metadata.annotations["argocd.argoproj.io/sync-wave"]
+          value: "-1"
+        template: templates/mailpit/service.yaml
+      - equal:
+          path: metadata.annotations["argocd.argoproj.io/sync-wave"]
+          value: "-1"
+        template: templates/mailpit/pvc.yaml
+      - equal:
+          path: metadata.annotations["argocd.argoproj.io/sync-wave"]
+          value: "-1"
+        template: templates/mailpit/secret.yaml
+
+  - it: satisfies the restricted Pod Security Standard
+    # The image declares no USER, so without podSecurityContext this would run
+    # as root and restricted PSS would reject it.
+    set:
+      mailpit.enabled: true
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.runAsUser
+          value: 1000
+        template: templates/mailpit/deployment.yaml
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+        template: templates/mailpit/deployment.yaml
+      - equal:
+          path: spec.template.spec.securityContext.seccompProfile.type
+          value: RuntimeDefault
+        template: templates/mailpit/deployment.yaml
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+        template: templates/mailpit/deployment.yaml
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+        template: templates/mailpit/deployment.yaml
+      - contains:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          content: ALL
+        template: templates/mailpit/deployment.yaml
+
+  - it: pins image, label, scheduling and resources from values
+    set:
+      mailpit.enabled: true
+      mailpit.image.tag: v1.30.8
+      mailpit.label: alpha-11
+      mailpit.nodeSelector: { disktype: ssd }
+      mailpit.tolerations:
+        - key: dedicated
+          operator: Equal
+          value: mail
+          effect: NoSchedule
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: axllent/mailpit:v1.30.8
+        template: templates/mailpit/deployment.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: MP_LABEL, value: alpha-11 }
+        template: templates/mailpit/deployment.yaml
+      - equal:
+          path: spec.template.spec.nodeSelector.disktype
+          value: ssd
+        template: templates/mailpit/deployment.yaml
+      - equal:
+          path: spec.template.spec.tolerations[0].key
+          value: dedicated
+        template: templates/mailpit/deployment.yaml
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.memory
+          value: 256Mi
+        template: templates/mailpit/deployment.yaml
+      - equal:
+          path: spec.template.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].key
+          value: node.kubernetes.io/disk-raid
+        template: templates/mailpit/deployment.yaml

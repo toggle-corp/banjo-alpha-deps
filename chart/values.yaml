@@ -404,46 +404,65 @@ minioConfig:
   # bytes). Empty → omitted from the Middleware spec, so Traefik's 1 MiB default
   # applies. Only takes effect when maxRequestBodyBytes is set.
   memRequestBodyBytes: 52428800   # 50 MiB — held in memory before spilling to disk
-
-# MailHog (SMTP catcher). One per instance: the app points its SMTP client at
-# `mailhog.<namespace>.svc.cluster.local:1025` and every message it sends is
-# swallowed and shown in MailHog's web UI instead of reaching a real inbox.
-# Rendered in-tree from templates/mailhog/ (the upstream community chart is
-# deprecated).
-#
-# The MailHog project itself is archived upstream — v1.0.1 (2020) is the last
-# release. It is kept because it is a stable, tiny, single-binary catcher and
-# alpha environments only need it to stop mail escaping. Mailpit is the
-# maintained successor if that ever stops being good enough.
-mailhog:
+# Mailpit (SMTP catcher). One per instance: the app points its SMTP client at
+# `mailpit.<namespace>.svc.cluster.local:1025` and every message it sends is
+# swallowed and shown in Mailpit's web UI instead of reaching a real inbox.
+# Rendered in-tree from templates/mailpit/ (there is no official subchart).
+mailpit:
   enabled: false
 
-  # Stable name → SMTP DNS: `mailhog.<namespace>.svc.cluster.local:1025`.
-  fullnameOverride: "mailhog"
+  # Stable name → SMTP DNS: `mailpit.<namespace>.svc.cluster.local:1025`.
+  fullnameOverride: "mailpit"
 
   # Override the name of the consumer-facing SMTP config Secret. Empty →
-  # computed default `<fullname>-smtp-config` (i.e. `mailhog-smtp-config`).
+  # computed default `<fullname>-smtp-config` (i.e. `mailpit-smtp-config`).
   secretName: ""
 
   image:
-    repository: mailhog/mailhog
-    tag: "v1.0.1"
+    repository: axllent/mailpit
+    tag: "v1.30.7"   # pinned — verify a real existing tag before bumping
     pullPolicy: IfNotPresent
     pullSecrets: []
 
-  # Hostname MailHog announces in its EHLO/HELO response and uses for the
-  # Message-ID domain. Cosmetic — nothing routes on it.
-  hostname: "mailhog.example"
+  # Shown in Mailpit's web UI to identify this instance (MP_LABEL). Empty → none.
+  # Useful when several alpha instances are open in adjacent browser tabs.
+  label: ""
 
   service:
     type: ClusterIP
     smtpPort: 1025
     httpPort: 8025
 
+  smtp:
+    # Accept ANY SMTP username/password, and also none. On by default because
+    # apps generally send credentials whether or not the catcher wants them —
+    # Django calls login() whenever EMAIL_HOST_USER is set, and stock Mailpit
+    # does not advertise AUTH at all, so the send fails with
+    # `SMTPNotSupportedError: SMTP AUTH extension not supported by server`.
+    #
+    # This also sets MP_SMTP_AUTH_ALLOW_INSECURE, which is mandatory rather than
+    # optional: Mailpit exits 1 on startup if accept-any is set without it
+    # ("authentication requires STARTTLS or TLS encryption"). The traffic is
+    # in-cluster plaintext to a mail catcher, so there is nothing to protect.
+    #
+    # Set false for a stricter server that accepts unauthenticated mail only.
+    acceptAnyAuth: true
+
+  # Mailpit prunes itself, which is the main operational difference from
+  # MailHog. Pruning is asynchronous — a background sweep, measured at roughly
+  # 45s — so the count overshoots briefly after a burst.
+  retention:
+    # Keep at most this many messages (MP_MAX_MESSAGES). 0 disables the cap and
+    # lets the database grow until the volume or the memory limit stops it.
+    maxMessages: 500
+    # Also drop messages older than this (MP_MAX_AGE), e.g. "24h" or "7d".
+    # Empty → age-based pruning off, count cap only.
+    maxAge: ""
+
   ui:
     # Web UI / API ingress. Off by default, and deliberately so: a mail catcher
     # holds every password-reset link and signup token the app has ever sent,
-    # and MailHog serves them unauthenticated unless `ui.auth` below is set.
+    # and Mailpit serves them unauthenticated unless `ui.auth` below is set.
     ingress:
       enabled: false
       ingressClassName: "traefik"
@@ -452,15 +471,23 @@ mailhog:
       path: /
       pathType: Prefix
       # Deployment-metadata standard: `app.togglecorp.com/component: resources`
-      # comes from `commonLabels` below, like the MinIO ingress. Use this for
-      # Traefik middlewares (e.g. a shared basic-auth middleware) or cert-manager.
-      annotations: {}
+      # comes from `commonLabels` below, like the MinIO ingress. Add your own
+      # entries here for Traefik middlewares or cert-manager — they deep-merge
+      # with the chart-fixed health-check below.
+      annotations:
+        # Endpoint for external uptime monitoring (NOT a k8s probe path, though
+        # here they happen to agree). Chart-fixed, like MinIO's: the path is a
+        # property of Mailpit, not of the install.
+        #
+        # /livez is exempt from MP_UI_AUTH_FILE, so a monitor gets a real 200
+        # even with the UI locked down — no credentials to distribute.
+        app.togglecorp.com/health-check: /livez
       # Passed through verbatim to `spec.tls`, e.g.
       #   - hosts: ["mail.example.com"]
       #     secretName: mail-example-com-tls
       tls: []
 
-    # HTTP basic auth for the UI and API (MailHog's `MH_AUTH_FILE`). Empty →
+    # HTTP basic auth for the UI and API (Mailpit's `MP_UI_AUTH_FILE`). Empty →
     # no auth at all. Provide exactly one of the two:
     #
     #   htpasswd            — inline `user:bcrypt-hash` lines, rendered into a
@@ -471,17 +498,24 @@ mailhog:
     # The bcrypt hash is supplied, not generated: sprig's `htpasswd` salts
     # randomly, so a chart-computed hash changes on every render and leaves an
     # ArgoCD app permanently OutOfSync. Mint one with:
-    #   docker run --rm mailhog/mailhog:v1.0.1 bcrypt '<password>'
+    #   htpasswd -nbB admin '<password>'
+    #
+    # /livez and /readyz stay open regardless, so the probes and any uptime
+    # monitor are unaffected.
     auth:
       htpasswd: ""
       existingSecret:
         name: ""
         key: ""             # NO default — must match the key in your Secret
 
-  # Message storage. Disabled → MH_STORAGE=memory: messages live in the pod's
-  # RAM and are lost on every restart, which is usually what an alpha
-  # environment wants. Enabled → MH_STORAGE=maildir on the PVC below, so the
-  # inbox survives restarts (and grows until the volume fills).
+  # Message storage. Disabled → Mailpit keeps its SQLite database in the
+  # container filesystem, so the inbox is lost on every restart, which is
+  # usually what an alpha environment wants. Enabled → the database lives on
+  # the PVC below (MP_DATABASE) and survives restarts and rollouts.
+  #
+  # Unlike a MailHog maildir this is safe to leave on: `retention` above bounds
+  # the database, and Mailpit pages queries rather than loading the whole store
+  # to render a list.
   persistence:
     enabled: false
     storageClass: "local-path"
@@ -489,9 +523,10 @@ mailhog:
     accessModes:
       - ReadWriteOnce
 
-  # Memory storage is unbounded — MailHog never evicts. The 256Mi limit is what
-  # stops a runaway test loop from eating a node; the pod is OOM-killed and the
-  # inbox starts empty. Raise it, or turn on persistence, if that matters.
+  # Sized for the default 500-message cap. Peak memory tracks message size and
+  # concurrency rather than the total inbox, so this does not need to grow with
+  # a long-lived instance — but a burst of very large attachments does push it,
+  # so raise the limit if `retention.maxMessages` goes up a lot.
   resources:
     requests:
       cpu: 10m
@@ -500,8 +535,9 @@ mailhog:
       cpu: 500m
       memory: 256Mi
 
-  # The image runs as uid/gid 1000 (`mailhog`) already; this pins it so the PVC
-  # is group-writable and the restricted PSS is satisfied explicitly.
+  # The image declares no USER, so it would otherwise run as root. Mailpit needs
+  # no privileges: it binds 1025/8025 (both above 1024) and writes only to its
+  # database directory.
   podSecurityContext:
     runAsUser: 1000
     runAsGroup: 1000
@@ -511,8 +547,8 @@ mailhog:
       type: RuntimeDefault
 
   # Satisfies the restricted Pod Security Standard. `readOnlyRootFilesystem` is
-  # safe with both storage backends: memory storage writes nothing to disk, and
-  # maildir writes only under the mounted PVC.
+  # safe both ways: without persistence Mailpit keeps the database in memory,
+  # and with it the only writes go to the mounted PVC.
   containerSecurityContext:
     allowPrivilegeEscalation: false
     readOnlyRootFilesystem: true
@@ -523,7 +559,7 @@ mailhog:
   # Deployment-metadata standard (app.togglecorp.com/*): the deploy layer stamps
   # part-of/name/stack/tier/instance here; `component: resources` is OURS because
   # only this chart knows these resources serve a dependency, not the app.
-  # Applied to every mailhog resource. Selector-safe — the Deployment's
+  # Applied to every mailpit resource. Selector-safe — the Deployment's
   # matchLabels reads only app.kubernetes.io/{name,instance}.
   commonLabels:
     app.togglecorp.com/component: resources
@@ -543,7 +579,7 @@ mailhog:
 
   nodeSelector: {}
 
-  # Annotations applied to every mailhog resource's metadata. On the ingress
+  # Annotations applied to every mailpit resource's metadata. On the ingress
   # they are merged with `ui.ingress.annotations`, which wins on a conflict.
   commonAnnotations: {}
 

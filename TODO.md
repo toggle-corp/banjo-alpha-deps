@@ -34,13 +34,18 @@ Helm chart: simple Postgres replacement for Bitnami chart.
 - [x] Auto generate pg credentials secret for consumers. Renamed `<fullname>-credential` → `<fullname>-pg-credential`; added `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_URI` (URL-encoded) keys. Apps bind via `envFrom`. Helper renamed `tcpg.secretname` → `tcpg.pgSecretName`. Tests + docs updated.
 - [x] Multi-stack umbrella chart `banjo-alpha-deps`. tcpg stays DIY under `templates/tcpg/`; dragonfly pulled from OCI `ghcr.io/dragonflydb/dragonfly/helm@v1.38.0`; minio from the Bitnami OCI chart. All gated via `<name>.enabled`. Resource names stay `<release>-tcpg-*` regardless of umbrella name. Tests rewritten to `tcpg.*` value paths. (Garage was vendored here too, then dropped — MinIO covers the S3 role.)
 - [ ] Setup renovatebot for dependencies update tracking
-- [x] **MailHog per instance.** In-tree component under `templates/mailhog/` (the community
-      chart is deprecated): Deployment + Service (SMTP 1025 / UI 8025), opt-in maildir PVC,
-      opt-in UI ingress, and a `mailhog-smtp-config` Secret for the app's `envFrom`. UI basic
-      auth is `MH_AUTH_FILE`, with an operator-supplied bcrypt hash — the chart deliberately
-      does not compute one, since sprig's random salt would leave ArgoCD permanently
-      OutOfSync. MailHog itself is archived upstream (v1.0.1, 2020); Mailpit is the
-      successor if the SMTP-catcher role ever needs more.
+- [x] **Mailpit per instance.** In-tree component under `templates/mailpit/`: Deployment +
+      Service (SMTP 1025 / UI 8025), opt-in SQLite-on-PVC persistence, opt-in UI ingress,
+      and a `mailpit-smtp-config` Secret for the app's `envFrom`. UI basic auth is
+      `MP_UI_AUTH_FILE` with an operator-supplied bcrypt hash — the chart deliberately does
+      not compute one, since sprig's random salt would leave ArgoCD permanently OutOfSync;
+      `/livez` + `/readyz` stay exempt from it, so they serve as both probes and the
+      uptime-monitoring health-check. `smtp.acceptAnyAuth` is on by default because stock
+      Mailpit advertises no AUTH and Django dies with `SMTPNotSupportedError` when
+      `EMAIL_HOST_USER` is set; it forces `MP_SMTP_AUTH_ALLOW_INSECURE` too, without which
+      Mailpit exits 1. Built on MailHog first (v0.2.0-dev0/dev1) and swapped: MailHog is
+      archived (v1.0.1, 2020), and its maildir store loads the whole mailbox into memory to
+      list it — a 92MB store OOM-killed a 256Mi pod on one request.
 - [ ] **Verify Dragonfly OCI dep works under ArgoCD.** The chart is pulled from `oci://ghcr.io/dragonflydb/dragonfly/helm` and the `.tgz` is `.gitignore`d, so ArgoCD's repo-server has to run `helm dependency build` at sync time. Requires: (1) network egress from `argocd-repo-server` to `ghcr.io`, (2) OCI-enabled repo-server (default since v2.4). If the tc cluster blocks egress or strips OCI support, flip `charts/*.tgz` out of `.gitignore` and commit the tarball for fully-offline sync.
 - [x] Merge values/alpha.yaml -> values.yaml
 - [x] Drop Garage. The vendored `charts/garage/`, `scripts/vendor-garage.sh`, its

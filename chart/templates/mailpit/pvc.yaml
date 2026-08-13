@@ -1,0 +1,21 @@
+{{- if and .Values.mailpit.enabled .Values.mailpit.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ template "mailpit.fullname" . }}-data
+  labels:
+    {{- include "mailpit.labels" . | nindent 4 }}
+  {{- with .Values.mailpit.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.mailpit.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  accessModes:
+    {{- toYaml .Values.mailpit.persistence.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ required "mailpit.persistence.size is required" .Values.mailpit.persistence.size | quote }}
+{{- end }}

@@ -7,7 +7,7 @@ Helm umbrella chart bundling the stateful dependencies our alpha environments ne
 | `tcpg` | Single-replica Postgres with an optional one-shot restore from a dump URL on first boot | in-tree (`chart/templates/tcpg/`) |
 | `minio` | S3-compatible object storage | Bitnami chart (OCI) |
 | `dragonfly` | Redis/Memcached-compatible in-memory store | DragonflyDB chart (OCI) |
-| `mailhog` | SMTP catcher — swallows the instance's outgoing mail and shows it in a web UI | in-tree (`chart/templates/mailhog/`) |
+| `mailpit` | SMTP catcher — swallows the instance's outgoing mail and shows it in a web UI | in-tree (`chart/templates/mailpit/`) |
 
 Every component is **opt-in** — all four default to `enabled: false`.
 
