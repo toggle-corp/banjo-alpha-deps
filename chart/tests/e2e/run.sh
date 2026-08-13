@@ -594,20 +594,29 @@ metadata:
   name: mailclient
 data:
   client.py: |
-    import base64, json, os, smtplib, sys, urllib.error, urllib.request
+    import base64, json, os, smtplib, sys, time, urllib.error, urllib.request
     from email.message import EmailMessage
     host, smtp_port = os.environ["MP_HOST"], int(os.environ["MP_SMTP_PORT"])
     base = "http://%s:8025" % host
 
     def get(path, authenticated):
+        # Retry only connection-level failures: a Service endpoint can take a
+        # moment to point at the replacement pod. An HTTP status is an answer,
+        # so it is returned immediately and asserted on.
         req = urllib.request.Request(base + path)
         if authenticated:
             req.add_header("Authorization", "Basic " + base64.b64encode(b"admin:hunter2").decode())
-        try:
-            with urllib.request.urlopen(req, timeout=10) as r:
-                return r.status, r.read()
-        except urllib.error.HTTPError as e:
-            return e.code, None
+        deadline = time.monotonic() + 60
+        while True:
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    return r.status, r.read()
+            except urllib.error.HTTPError as e:
+                return e.code, None
+            except (urllib.error.URLError, OSError) as e:
+                if time.monotonic() >= deadline:
+                    raise AssertionError("%s unreachable after 60s: %r" % (path, e))
+                time.sleep(1)
 
     if sys.argv[1] == "send":
         s = smtplib.SMTP(host, smtp_port, timeout=10)
@@ -662,19 +671,31 @@ EOF
 k wait --for=condition=ready pod/mailclient --timeout=180s >/dev/null \
   || die mailpit "mail client pod never became ready"
 
-total=$(k exec mailclient -- python3 /app/client.py send 2>&1 | tail -1 | tr -d ' \r') \
-  || die mailpit "client failed: $total"
-[ "$total" = "1" ] || die mailpit "expected 1 caught message, API reported '$total'"
+# Capture the whole thing: `| tail -1` would throw away the Python traceback and
+# leave only kubectl's "command terminated with exit code 1".
+mp_out=$(k exec mailclient -- python3 /app/client.py send 2>&1) \
+  || die mailpit "client failed: $mp_out"
+total=$(tail -1 <<<"$mp_out" | tr -d ' \r')
+[ "$total" = "1" ] || die mailpit "expected 1 caught message, client said: $mp_out"
 pass mailpit "SMTP AUTH accepted on :$mp_port; API 401s anonymously while /livez and /readyz stay open"
 
 # The SQLite database lives on the PVC, so the inbox must outlive the pod. This
 # also proves fsGroup 1000 makes the volume writable for the non-root user.
-k delete pod -l app.kubernetes.io/name=mailpit --wait >/dev/null
+# Wait for the replacement by name. `rollout status` alone races here: run
+# straight after the delete it can report the pre-existing rollout complete
+# before the controller has even observed the deletion, and the client then
+# talks to a Service with no ready endpoint.
+mp_old=$(k get pod -l app.kubernetes.io/name=mailpit -o jsonpath='{.items[0].metadata.name}')
+k delete pod "$mp_old" --wait >/dev/null
+k wait --for=delete "pod/$mp_old" --timeout=120s >/dev/null 2>&1 || true
 k rollout status deployment mailpit --timeout=180s >/dev/null \
   || die mailpit "mailpit never came back after the pod delete"
-total=$(k exec mailclient -- python3 /app/client.py check 2>&1 | tail -1 | tr -d ' \r') \
-  || die mailpit "client failed after restart: $total"
-[ "$total" = "1" ] || die mailpit "the database did not survive the restart (API reported '$total')"
+k wait --for=condition=ready pod -l app.kubernetes.io/name=mailpit --timeout=180s >/dev/null \
+  || die mailpit "the replacement pod never became ready"
+mp_out=$(k exec mailclient -- python3 /app/client.py check 2>&1) \
+  || die mailpit "client failed after restart: $mp_out"
+total=$(tail -1 <<<"$mp_out" | tr -d ' \r')
+[ "$total" = "1" ] || die mailpit "the database did not survive the restart, client said: $mp_out"
 pass mailpit "SQLite database on the PVC survived a pod delete"
 
 k delete pod mailclient --wait=false >/dev/null 2>&1 || true
