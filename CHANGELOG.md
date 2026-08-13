@@ -1,5 +1,35 @@
 # Changelog
 
+## [v0.2.0-dev1](https://github.com/toggle-corp/banjo-alpha-deps/compare/v0.1.0..v0.2.0-dev1) - 2026-08-13
+### Changes:
+
+#### 🚀  Features
+
+- *(chart)* Add per-instance MailHog SMTP catcher - ([f930e3c](https://github.com/toggle-corp/banjo-alpha-deps/commit/f930e3cca5175c9bfeb17d33ee8acbc4fc5be20b))
+- *(chart)* Size Postgres from its resource limits, fix shutdown and /dev/shm - ([84878a3](https://github.com/toggle-corp/banjo-alpha-deps/commit/84878a3330a6ecb68861abe6cb88ec63c5bc228d))
+- Add gitleaks - ([c3caadd](https://github.com/toggle-corp/banjo-alpha-deps/commit/c3caadd82d5a76695c915925dba0b4b519597a0b))
+
+#### 🐛 Bug Fixes
+
+- *(chart)* Quote mailhog label values - ([dccb615](https://github.com/toggle-corp/banjo-alpha-deps/commit/dccb615e601fee25d4779a5fbe3bda1b13b14dfd))
+- *(chart)* Budget autovacuum memory, correct stale comments - ([56ea4cc](https://github.com/toggle-corp/banjo-alpha-deps/commit/56ea4cca5ef2243c37d6c069876e99a48cb28147))
+- *(ci)* Build release notes from CHANGELOG.md instead of git-cliff --latest - ([41899a5](https://github.com/toggle-corp/banjo-alpha-deps/commit/41899a595f95c0c9ea7dba25159cabec578960c1))
+- *(ci)* Fetch chart deps for the integration job, satisfy CI's shellcheck - ([abc5aef](https://github.com/toggle-corp/banjo-alpha-deps/commit/abc5aefdfd576ce1923dd6fa114c8a7cf98358ca))
+- *(tests)* Tolerate log-flush lag when asserting a clean shutdown - ([ea167ff](https://github.com/toggle-corp/banjo-alpha-deps/commit/ea167ff5a6f33437916d6a8327520bbe118b2bd3))
+- *(tests)* Wait for the final Postgres server, not the initdb temp one - ([255e7f3](https://github.com/toggle-corp/banjo-alpha-deps/commit/255e7f3618162a7aa3589c9a16835526526a2e75))
+
+#### 🧪 Testing
+
+- *(chart)* Add kind e2e suite; fix restricted-PSS Jobs, correct shutdown claim - ([258d7ff](https://github.com/toggle-corp/banjo-alpha-deps/commit/258d7ffff32f797341097ecdf80f09c39bf1f457))
+
+#### ⚙️ Miscellaneous Tasks
+
+- Widen pre-commit helm hook file filters - ([10d5103](https://github.com/toggle-corp/banjo-alpha-deps/commit/10d5103ef49f8dfdbd45db6e25908e60da3c23bf))
+
+### 🍻 Pull Requests (1)
+- (#1) [Feat(chart): size Postgres from its resource limits, bound memory, add kind e2e suite](https://github.com/toggle-corp/banjo-alpha-deps/pull/1)
+
+
 ## [v0.1.0] - 2026-07-28
 ### Changes:
 

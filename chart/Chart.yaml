@@ -2,7 +2,7 @@ apiVersion: v2
 name: banjo-alpha-deps
 description: "Umbrella chart for alpha-environment dependencies (tcpg, dragonfly, minio, mailhog)."
 type: application
-version: 0.1.0  # managed by release.sh
+version: 0.2.0-dev1  # managed by release.sh
 sources:
   - https://github.com/toggle-corp/banjo-alpha-deps
 dependencies:
