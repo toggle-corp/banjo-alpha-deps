@@ -1,0 +1,21 @@
+{{- if and .Values.mailhog.enabled .Values.mailhog.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ template "mailhog.fullname" . }}-maildir
+  labels:
+    {{- include "mailhog.labels" . | nindent 4 }}
+  {{- with .Values.mailhog.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.mailhog.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  accessModes:
+    {{- toYaml .Values.mailhog.persistence.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ required "mailhog.persistence.size is required" .Values.mailhog.persistence.size | quote }}
+{{- end }}

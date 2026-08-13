@@ -1,6 +1,6 @@
 # Using the chart
 
-Umbrella chart of alpha-environment dependencies for the tc cluster: Postgres (`tcpg`), MinIO, and Dragonfly. Every component is opt-in (`enabled: false` by default). `tcpg` is a single-replica Postgres with an optional one-shot restore from a URL on first boot.
+Umbrella chart of alpha-environment dependencies for the tc cluster: Postgres (`tcpg`), MinIO, Dragonfly, and MailHog. Every component is opt-in (`enabled: false` by default). `tcpg` is a single-replica Postgres with an optional one-shot restore from a URL on first boot.
 
 Chart source: <https://github.com/toggle-corp/banjo-alpha-deps>.
 
@@ -73,6 +73,14 @@ minioConfig:
   secretAccessKey: ""          # optional — set to pin/rotate
   endpointUrl: ""             # optional — set instead of minio.ingress.hostname for in-cluster endpoints
 
+# === MailHog (SMTP catcher) ==================================================
+mailhog:
+  enabled: false               # flip to true to deploy a per-instance mail catcher
+  ui:
+    ingress:
+      enabled: false           # UI is unauthenticated unless ui.auth is set — see below
+      hostname: ""             # REQUIRED when the ingress is enabled
+
 # === Dragonfly (optional extra component) ====================================
 dragonfly:
   enabled: false               # flip to true to deploy Dragonfly (Redis-compatible)
@@ -82,6 +90,7 @@ dragonfly:
 
 - `tcpg-pg-credential` — Postgres connection (`POSTGRES_HOST/PORT/DB/USER/PASSWORD/URI`).
 - `minio-s3-credential` — S3 access (`S3_ENDPOINT_URL/REGION/ACCESS_KEY_ID/SECRET_ACCESS_KEY`).
+- `mailhog-smtp-config` — SMTP settings (`SMTP_HOST/PORT/USER/PASSWORD/USE_TLS/URL`).
 
 ## Alpha environment (tc cluster)
 
@@ -124,7 +133,9 @@ Responsibilities are split, and Helm deep-merges the two halves:
 | `health-check: /minio/health/live` | **this chart** — MinIO's liveness path is a property of MinIO |
 
 A parent Helm chart cannot push values into a subchart, so the deploy layer writes the
-subchart paths directly. If you install this chart by hand and want the taxonomy, supply:
+subchart paths directly. MailHog is in-tree and takes the same `commonLabels` key
+(`mailhog.commonLabels`), which lands on every MailHog resource, not just the ingress.
+If you install this chart by hand and want the taxonomy, supply:
 
 ```yaml
 minio:
@@ -449,11 +460,12 @@ kubectl -n <namespace> get secret tcpg-pg-credential \
 
 ## Subcharts
 
-`banjo-alpha-deps` is an umbrella. tcpg is a DIY component rendered from `templates/tcpg/`. MinIO and Dragonfly come in via Helm dependencies.
+`banjo-alpha-deps` is an umbrella. tcpg and mailhog are DIY components rendered from `templates/`. MinIO and Dragonfly come in via Helm dependencies.
 
 | Component  | Source                                                  | Gate                 |
 |------------|---------------------------------------------------------|----------------------|
 | tcpg       | DIY (this chart, `templates/tcpg/`)                     | `tcpg.enabled`       |
+| mailhog    | DIY (this chart, `templates/mailhog/`)                  | `mailhog.enabled`    |
 | dragonfly  | `oci://ghcr.io/dragonflydb/dragonfly/helm`, pinned in `Chart.yaml` | `dragonfly.enabled` |
 | minio      | `oci://registry-1.docker.io/bitnamicharts/minio`, pinned in `Chart.yaml` | `minio.enabled`     |
 
@@ -572,6 +584,160 @@ The baked-in `chart/values.yaml` defaults already wire all of this with a 100 Mi
 
 Trade-off: `bitnamilegacy/*` is frozen — no future security patches. Acceptable for alpha; **not** for production. For prod, either restore `image.repository: bitnami/<name>` (and the other three) and supply pull secrets for a Bitnami Secure Images subscription, or migrate off the Bitnami chart entirely (e.g. `minio/operator`).
 
+### Enabling MailHog
+
+A per-instance SMTP catcher. The app points its mail client at
+`mailhog.<namespace>.svc.cluster.local:1025` and every message it sends is swallowed and
+listed in MailHog's web UI instead of reaching a real inbox — so an alpha environment can
+exercise password resets, invites and digests without mailing real people.
+
+Rendered in-tree from `templates/mailhog/` (a Deployment, a Service, and optionally a PVC,
+an ingress and an auth Secret); the community MailHog chart is deprecated, so there is no
+subchart to pull.
+
+```yaml
+mailhog:
+  enabled: true
+```
+
+That is the whole minimum. SMTP DNS: `mailhog.<namespace>.svc.cluster.local:1025`; the web
+UI and API listen on `:8025` on the same Service.
+
+Wire the app up with `envFrom` — the chart renders a **`mailhog-smtp-config`** Secret:
+
+```yaml
+envFrom:
+  - secretRef:
+      name: mailhog-smtp-config
+```
+
+| Key | Value |
+| --- | --- |
+| `SMTP_HOST` | `mailhog.<namespace>.svc.cluster.local` |
+| `SMTP_PORT` | `1025` (or the `service.smtpPort` override) |
+| `SMTP_USER` | `""` — MailHog accepts any AUTH exchange, and also accepts none |
+| `SMTP_PASSWORD` | `""` |
+| `SMTP_USE_TLS` | `"false"` |
+| `SMTP_URL` | `smtp://<host>:<port>` |
+
+It is a Secret purely so every dependency binds the same way; nothing in it is
+confidential. Unlike the Postgres and MinIO credentials it is rendered straight from
+values — there is no credential to generate, so none of the bootstrap-Job machinery
+applies. Override its name with `mailhog.secretName`.
+
+#### Exposing the UI
+
+Off by default, and deliberately: **a mail catcher holds every password-reset link,
+signup token and invite the app has ever sent**, and MailHog serves the UI and API
+unauthenticated unless you configure `ui.auth`. Turning on the ingress without auth
+publishes all of it to anyone who can resolve the hostname.
+
+```yaml
+mailhog:
+  enabled: true
+  ui:
+    ingress:
+      enabled: true
+      hostname: mail.alpha-3.example.com   # REQUIRED — rendering fails closed if empty
+      ingressClassName: traefik
+      annotations: {}
+      tls: []      # passed through verbatim to spec.tls
+```
+
+`ui.ingress.annotations` is merged with `mailhog.commonAnnotations`, and wins on a
+conflict — use it to attach a Traefik middleware, cert-manager issuer, or anything else
+that is ingress-specific.
+
+#### UI basic auth (`MH_AUTH_FILE`)
+
+MailHog reads one `user:bcrypt-hash` line per user out of a file named by `MH_AUTH_FILE`,
+and applies it to both the UI and the API. **You supply the hash; the chart does not
+compute it** — sprig's `htpasswd` picks a fresh salt on every render, so a chart-computed
+hash would change on every `helm upgrade` and leave an ArgoCD app permanently `OutOfSync`.
+
+Mint one with MailHog's own subcommand:
+
+```bash
+docker run --rm mailhog/mailhog:v1.0.1 bcrypt 'your-password-here'
+# $2a$04$/eeOOFDbquieypRZZV7VMeha9EiiZ8kOy1Z4LuOjE22xwm7nINRkG
+```
+
+Then either inline it — the chart renders it into a `mailhog-ui-auth` Secret and mounts it:
+
+```yaml
+mailhog:
+  ui:
+    auth:
+      htpasswd: 'admin:$2a$04$/eeOOFDbquieypRZZV7VMeha9EiiZ8kOy1Z4LuOjE22xwm7nINRkG'
+```
+
+…or point at an externally-managed Secret (SealedSecrets, External Secrets, Vault):
+
+```bash
+kubectl -n <namespace> create secret generic mailhog-auth \
+  --from-literal=auth-file='admin:$2a$04$/eeOOFDbquieypRZZV7VMeha9EiiZ8kOy1Z4LuOjE22xwm7nINRkG'
+```
+
+```yaml
+mailhog:
+  ui:
+    auth:
+      existingSecret:
+        name: mailhog-auth
+        key: auth-file      # required — no default
+```
+
+Inline and external are mutually exclusive; the template fails at render time if both are
+set, or if `existingSecret.name` is given without a `key`. Changing the inline hash rolls
+the pod (a `checksum/ui-auth` annotation); changing an external Secret does not — restart
+MailHog yourself.
+
+The probes are `tcpSocket`, not `httpGet`, precisely because auth makes every HTTP path
+answer `401`, which an `httpGet` probe counts as a failure.
+
+#### Storage
+
+Default is `MH_STORAGE=memory`: messages live in the pod's RAM and are **lost on every
+restart**, which is usually what an alpha environment wants. MailHog never evicts, so the
+inbox grows until the 256Mi limit OOM-kills the pod and it starts empty again — raise
+`mailhog.resources.limits.memory` if a test loop sends enough to hit that.
+
+For an inbox that survives restarts, switch to maildir on a PVC:
+
+```yaml
+mailhog:
+  persistence:
+    enabled: true
+    storageClass: local-path   # ignored by local-path (node disk is the real limit)
+    size: 1Gi
+```
+
+The Deployment uses the `Recreate` strategy so a rollout never contends for the
+`ReadWriteOnce` volume. Nothing prunes the maildir — it grows until the volume fills.
+
+#### `mailhog` option reference
+
+- `mailhog.enabled` (default `false`).
+- `mailhog.fullnameOverride` (default `"mailhog"`) — fixed name gives the stable SMTP DNS. Clear it for `<release>-mailhog-*`.
+- `mailhog.secretName` (default empty → `mailhog-smtp-config`).
+- `mailhog.image.{repository,tag,pullPolicy,pullSecrets}` (default `mailhog/mailhog:v1.0.1`).
+- `mailhog.hostname` (default `mailhog.example`) — the EHLO/HELO name and Message-ID domain. Cosmetic; nothing routes on it.
+- `mailhog.service.{type,smtpPort,httpPort}` (default `ClusterIP`, `1025`, `8025`). MailHog binds 1025/8025 inside the container regardless; only the Service side moves.
+- `mailhog.ui.ingress.{enabled,ingressClassName,hostname,path,pathType,annotations,tls}` — see above.
+- `mailhog.ui.auth.{htpasswd,existingSecret.{name,key}}` — see above.
+- `mailhog.persistence.{enabled,storageClass,size,accessModes}` — see above.
+- `mailhog.resources` — default `requests: {cpu: 10m, memory: 64Mi}` / `limits: {cpu: 500m, memory: 256Mi}`.
+- `mailhog.podSecurityContext` / `mailhog.containerSecurityContext` — default to the image's own uid/gid 1000 and the restricted PSS. `readOnlyRootFilesystem: true` is safe both ways: memory storage writes nothing to disk, maildir writes only under the mounted PVC.
+- `mailhog.commonLabels` (default `app.togglecorp.com/component: resources`) — on every MailHog resource; selector-safe, since the Deployment's `matchLabels` reads only `app.kubernetes.io/{name,instance}`.
+- `mailhog.commonAnnotations` — on every MailHog resource's metadata.
+- `mailhog.{affinity,tolerations,nodeSelector}` — `affinity` defaults to the same RAID-avoiding rule as the other components.
+
+**MailHog is archived upstream.** `v1.0.1` (2020) is the last release and there will be no
+more. It is used anyway because it is a tiny single static binary that does exactly one
+thing, and an alpha environment only needs it to stop mail escaping. [Mailpit](https://mailpit.axllent.org/)
+is the maintained successor if that stops being good enough — its SMTP port is also 1025,
+so the app-side wiring would not change.
+
 ## Releasing
 
 Releases are cut locally with [`./release.sh`](../release.sh) and published by CI on
@@ -616,7 +782,7 @@ No registry secret is needed — the workflow authenticates to GHCR with the bui
 | `lint` | pre-commit hygiene hooks + `helm lint` + `helm unittest` |
 | `unittest` | standalone `helm lint` / `helm unittest` — rendered YAML and the render-time guards |
 | `integration` | `chart/tests/integration/run.sh` — real Postgres containers: the three restore formats, the corrupt-dump failure path, that the rendered parameters actually start Postgres, `pg_ctl -m fast stop` with a client attached, the `/dev/shm` A/B, and that the image still declares `STOPSIGNAL SIGINT` |
-| `e2e` | `chart/tests/e2e/run.sh` — a real cluster via kind: restricted-PSS admission, the secret-bootstrap Helm hooks, `emptyDir{medium: Memory}` sizing and enforcement, the preStop hook and what the runtime does without it, `max_connections` refusing rather than OOM-killing, upgrade rollouts, and the restore init container |
+| `e2e` | `chart/tests/e2e/run.sh` — a real cluster via kind: restricted-PSS admission, the secret-bootstrap Helm hooks, `emptyDir{medium: Memory}` sizing and enforcement, the preStop hook and what the runtime does without it, `max_connections` refusing rather than OOM-killing, upgrade rollouts, the restore init container, and MailHog catching a real SMTP message behind `MH_AUTH_FILE` on a maildir PVC |
 
 Locally, `./prepush.sh` runs everything except the e2e suite, which creates and destroys a
 kind cluster and so is opt-in:

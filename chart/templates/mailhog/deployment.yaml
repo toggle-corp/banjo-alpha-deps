@@ -1,0 +1,126 @@
+{{- if .Values.mailhog.enabled }}
+{{- $auth := include "mailhog.authSource" . | fromYaml }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ template "mailhog.fullname" . }}
+  labels:
+    {{- include "mailhog.labels" . | nindent 4 }}
+  {{- with .Values.mailhog.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: 1
+  # Recreate, not RollingUpdate: the maildir PVC is ReadWriteOnce, so a second
+  # pod would block on the volume. With memory storage the messages are lost on
+  # any restart regardless.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "mailhog.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mailhog.podLabels" . | nindent 8 }}
+      {{- if .Values.mailhog.ui.auth.htpasswd }}
+      annotations:
+        checksum/ui-auth: {{ include (print $.Template.BasePath "/mailhog/secret-ui-auth.yaml") . | sha256sum }}
+      {{- end }}
+    spec:
+      {{- with .Values.mailhog.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.mailhog.podSecurityContext | nindent 8 }}
+      containers:
+        - name: mailhog
+          image: "{{ .Values.mailhog.image.repository }}:{{ .Values.mailhog.image.tag }}"
+          imagePullPolicy: {{ .Values.mailhog.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.mailhog.containerSecurityContext | nindent 12 }}
+          ports:
+            # MailHog's own defaults; the Service maps `service.*Port` onto these.
+            - name: smtp
+              containerPort: 1025
+              protocol: TCP
+            - name: http
+              containerPort: 8025
+              protocol: TCP
+          env:
+            - name: MH_HOSTNAME
+              value: {{ .Values.mailhog.hostname | quote }}
+            {{- if .Values.mailhog.persistence.enabled }}
+            - name: MH_STORAGE
+              value: maildir
+            - name: MH_MAILDIR_PATH
+              value: /maildir
+            {{- else }}
+            - name: MH_STORAGE
+              value: memory
+            {{- end }}
+            {{- if $auth.name }}
+            - name: MH_AUTH_FILE
+              value: {{ printf "%s/%s" (include "mailhog.authMountPath" .) $auth.key }}
+            {{- end }}
+          # tcpSocket, not httpGet: with MH_AUTH_FILE set every UI/API path
+          # answers 401, which an httpGet probe counts as a failure.
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          {{- with .Values.mailhog.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if or .Values.mailhog.persistence.enabled $auth.name }}
+          volumeMounts:
+            {{- if .Values.mailhog.persistence.enabled }}
+            - name: maildir
+              mountPath: /maildir
+            {{- end }}
+            {{- if $auth.name }}
+            - name: ui-auth
+              mountPath: {{ include "mailhog.authMountPath" . }}
+              readOnly: true
+            {{- end }}
+          {{- end }}
+      {{- with .Values.mailhog.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.mailhog.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.mailhog.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if or .Values.mailhog.persistence.enabled $auth.name }}
+      volumes:
+        {{- if .Values.mailhog.persistence.enabled }}
+        - name: maildir
+          persistentVolumeClaim:
+            claimName: {{ template "mailhog.fullname" . }}-maildir
+        {{- end }}
+        {{- if $auth.name }}
+        - name: ui-auth
+          secret:
+            secretName: {{ $auth.name }}
+            items:
+              - key: {{ $auth.key }}
+                path: {{ $auth.key }}
+        {{- end }}
+      {{- end }}
+{{- end }}

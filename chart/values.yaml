@@ -405,6 +405,148 @@ minioConfig:
   # applies. Only takes effect when maxRequestBodyBytes is set.
   memRequestBodyBytes: 52428800   # 50 MiB — held in memory before spilling to disk
 
+# MailHog (SMTP catcher). One per instance: the app points its SMTP client at
+# `mailhog.<namespace>.svc.cluster.local:1025` and every message it sends is
+# swallowed and shown in MailHog's web UI instead of reaching a real inbox.
+# Rendered in-tree from templates/mailhog/ (the upstream community chart is
+# deprecated).
+#
+# The MailHog project itself is archived upstream — v1.0.1 (2020) is the last
+# release. It is kept because it is a stable, tiny, single-binary catcher and
+# alpha environments only need it to stop mail escaping. Mailpit is the
+# maintained successor if that ever stops being good enough.
+mailhog:
+  enabled: false
+
+  # Stable name → SMTP DNS: `mailhog.<namespace>.svc.cluster.local:1025`.
+  fullnameOverride: "mailhog"
+
+  # Override the name of the consumer-facing SMTP config Secret. Empty →
+  # computed default `<fullname>-smtp-config` (i.e. `mailhog-smtp-config`).
+  secretName: ""
+
+  image:
+    repository: mailhog/mailhog
+    tag: "v1.0.1"
+    pullPolicy: IfNotPresent
+    pullSecrets: []
+
+  # Hostname MailHog announces in its EHLO/HELO response and uses for the
+  # Message-ID domain. Cosmetic — nothing routes on it.
+  hostname: "mailhog.example"
+
+  service:
+    type: ClusterIP
+    smtpPort: 1025
+    httpPort: 8025
+
+  ui:
+    # Web UI / API ingress. Off by default, and deliberately so: a mail catcher
+    # holds every password-reset link and signup token the app has ever sent,
+    # and MailHog serves them unauthenticated unless `ui.auth` below is set.
+    ingress:
+      enabled: false
+      ingressClassName: "traefik"
+      # REQUIRED when enabled — rendering fails closed if left empty.
+      hostname: ""
+      path: /
+      pathType: Prefix
+      # Deployment-metadata standard: `app.togglecorp.com/component: resources`
+      # comes from `commonLabels` below, like the MinIO ingress. Use this for
+      # Traefik middlewares (e.g. a shared basic-auth middleware) or cert-manager.
+      annotations: {}
+      # Passed through verbatim to `spec.tls`, e.g.
+      #   - hosts: ["mail.example.com"]
+      #     secretName: mail-example-com-tls
+      tls: []
+
+    # HTTP basic auth for the UI and API (MailHog's `MH_AUTH_FILE`). Empty →
+    # no auth at all. Provide exactly one of the two:
+    #
+    #   htpasswd            — inline `user:bcrypt-hash` lines, rendered into a
+    #                         chart-managed Secret `<fullname>-ui-auth`.
+    #   existingSecret      — reference an externally-managed Secret (SealedSecrets,
+    #                         External Secrets, Vault) holding the same file.
+    #
+    # The bcrypt hash is supplied, not generated: sprig's `htpasswd` salts
+    # randomly, so a chart-computed hash changes on every render and leaves an
+    # ArgoCD app permanently OutOfSync. Mint one with:
+    #   docker run --rm mailhog/mailhog:v1.0.1 bcrypt '<password>'
+    auth:
+      htpasswd: ""
+      existingSecret:
+        name: ""
+        key: ""             # NO default — must match the key in your Secret
+
+  # Message storage. Disabled → MH_STORAGE=memory: messages live in the pod's
+  # RAM and are lost on every restart, which is usually what an alpha
+  # environment wants. Enabled → MH_STORAGE=maildir on the PVC below, so the
+  # inbox survives restarts (and grows until the volume fills).
+  persistence:
+    enabled: false
+    storageClass: "local-path"
+    size: 1Gi  # NOTE: ignored by local-path (node disk is the real limit)
+    accessModes:
+      - ReadWriteOnce
+
+  # Memory storage is unbounded — MailHog never evicts. The 256Mi limit is what
+  # stops a runaway test loop from eating a node; the pod is OOM-killed and the
+  # inbox starts empty. Raise it, or turn on persistence, if that matters.
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+  # The image runs as uid/gid 1000 (`mailhog`) already; this pins it so the PVC
+  # is group-writable and the restricted PSS is satisfied explicitly.
+  podSecurityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+
+  # Satisfies the restricted Pod Security Standard. `readOnlyRootFilesystem` is
+  # safe with both storage backends: memory storage writes nothing to disk, and
+  # maildir writes only under the mounted PVC.
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+
+  # Deployment-metadata standard (app.togglecorp.com/*): the deploy layer stamps
+  # part-of/name/stack/tier/instance here; `component: resources` is OURS because
+  # only this chart knows these resources serve a dependency, not the app.
+  # Applied to every mailhog resource. Selector-safe — the Deployment's
+  # matchLabels reads only app.kubernetes.io/{name,instance}.
+  commonLabels:
+    app.togglecorp.com/component: resources
+
+  # Steer alpha mail catchers off RAID nodes — RAID is reserved for prod.
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: "node.kubernetes.io/disk-raid"
+            operator: NotIn
+            values:
+              - "true"
+
+  tolerations: []
+
+  nodeSelector: {}
+
+  # Annotations applied to every mailhog resource's metadata. On the ingress
+  # they are merged with `ui.ingress.annotations`, which wins on a conflict.
+  commonAnnotations: {}
+
 # Shared config for the credential-bootstrap Helm-hook Jobs. A pre-install /
 # pre-upgrade Job runs `kubectl` against the live cluster to create/manage the
 # tcpg-pg-credential and minio-s3-credential Secrets (one GitOps-safe mechanism

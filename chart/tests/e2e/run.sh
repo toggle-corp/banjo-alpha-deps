@@ -550,5 +550,114 @@ for case in "tcpg.parameters.work_mem=16MB|budget exceeded" \
 done
 pass guards "budget, autovacuum and unit guards all reject at install time"
 
+# ---------------------------------------------------------------------------
+# Phase 9 — mailhog catches SMTP, guards the UI, and survives a restart
+# ---------------------------------------------------------------------------
+# bcrypt of "hunter2", minted with `docker run --rm mailhog/mailhog:v1.0.1
+# bcrypt hunter2`. A fixture, not a credential — the chart never generates one
+# (a fresh salt per render would leave an ArgoCD app permanently OutOfSync).
+# shellcheck disable=SC2016  # the $2a$/$04$ are bcrypt field separators, not shell
+MH_HTPASSWD='admin:$2a$04$/eeOOFDbquieypRZZV7VMeha9EiiZ8kOy1Z4LuOjE22xwm7nINRkG'
+
+echo "==> [mailhog] installing with maildir persistence and UI auth..."
+helm install mailhog-check "$CHART_DIR" -n "$NS" --set mailhog.enabled=true \
+  --set mailhog.persistence.enabled=true \
+  --set "mailhog.ui.auth.htpasswd=$MH_HTPASSWD" \
+  --wait --timeout 5m >"$TMPDIR/mailhog.log" 2>&1 \
+  || { echo "FAIL [mailhog]: helm install failed" >&2; tail -30 "$TMPDIR/mailhog.log" >&2
+       k get events --sort-by=.lastTimestamp 2>&1 | tail -20 >&2; exit 1; }
+pass mailhog "admitted under restricted PSS with readOnlyRootFilesystem and reached Ready"
+
+# The client reads the connection details out of the chart's own consumer
+# Secret, so a wrong host/port there fails this phase rather than passing
+# quietly.
+mh_host=$(k get secret mailhog-smtp-config -o jsonpath='{.data.SMTP_HOST}' | base64 -d)
+mh_port=$(k get secret mailhog-smtp-config -o jsonpath='{.data.SMTP_PORT}' | base64 -d)
+[ "$mh_host" = "mailhog.$NS.svc.cluster.local" ] \
+  || die mailhog "SMTP_HOST is '$mh_host', expected mailhog.$NS.svc.cluster.local"
+
+kubectl apply -n "$NS" -f - >/dev/null <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mailclient
+data:
+  client.py: |
+    import base64, json, os, smtplib, sys, urllib.error, urllib.request
+    from email.message import EmailMessage
+    host, smtp_port = os.environ["MH_HOST"], int(os.environ["MH_SMTP_PORT"])
+    api = "http://%s:8025/api/v2/messages" % host
+
+    def get(authenticated):
+        req = urllib.request.Request(api)
+        if authenticated:
+            req.add_header("Authorization", "Basic " + base64.b64encode(b"admin:hunter2").decode())
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, json.load(r)
+        except urllib.error.HTTPError as e:
+            return e.code, None
+
+    if sys.argv[1] == "send":
+        m = EmailMessage()
+        m["From"], m["To"], m["Subject"] = "app@alpha.test", "user@example.com", "e2e"
+        m.set_content("hello from e2e")
+        s = smtplib.SMTP(host, smtp_port, timeout=10)
+        s.send_message(m)
+        s.quit()
+
+    code, _ = get(False)
+    assert code == 401, "unauthenticated API returned %s, expected 401" % code
+    code, body = get(True)
+    assert code == 200, "authenticated API returned %s, expected 200" % code
+    print(body["total"])
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mailclient
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: c
+      image: python:3.13-alpine
+      command: [sleep, infinity]
+      env:
+        - {name: MH_HOST, value: "$mh_host"}
+        - {name: MH_SMTP_PORT, value: "$mh_port"}
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities: {drop: [ALL]}
+      volumeMounts:
+        - {name: app, mountPath: /app}
+  volumes:
+    - name: app
+      configMap: {name: mailclient}
+EOF
+k wait --for=condition=ready pod/mailclient --timeout=180s >/dev/null \
+  || die mailhog "mail client pod never became ready"
+
+total=$(k exec mailclient -- python3 /app/client.py send 2>&1 | tail -1 | tr -d ' \r') \
+  || die mailhog "client failed: $total"
+[ "$total" = "1" ] || die mailhog "expected 1 caught message, API reported '$total'"
+pass mailhog "SMTP on :$mh_port caught the message; UI/API answers 401 without the MH_AUTH_FILE credentials"
+
+# maildir lives on the PVC, so the inbox must outlive the pod. This also proves
+# fsGroup 1000 makes the volume writable for the non-root mailhog user.
+k delete pod -l app.kubernetes.io/name=mailhog --wait >/dev/null
+k rollout status deployment mailhog --timeout=180s >/dev/null \
+  || die mailhog "mailhog never came back after the pod delete"
+total=$(k exec mailclient -- python3 /app/client.py check 2>&1 | tail -1 | tr -d ' \r') \
+  || die mailhog "client failed after restart: $total"
+[ "$total" = "1" ] || die mailhog "maildir did not survive the restart (API reported '$total')"
+pass mailhog "maildir on the PVC survived a pod delete"
+
+k delete pod mailclient --wait=false >/dev/null 2>&1 || true
+helm uninstall mailhog-check -n "$NS" >/dev/null 2>&1 || true
+
 echo
 echo "All e2e tests passed."
