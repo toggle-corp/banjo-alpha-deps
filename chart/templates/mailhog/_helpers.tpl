@@ -82,6 +82,21 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
 {{/*
+Emit a label map as YAML with every value quoted. Arg: the map.
+
+Quoting is load-bearing, not cosmetic. A Kubernetes label value is a string, and
+`toYaml` renders a numeric value bare — so an instance id arriving as `11`
+(which is what the deploy layer's `__BANJO_INSTANCE_ID__` substitution produces)
+would render as a number and the API server rejects the object with
+"got number, want string". Map iteration is key-sorted, so output is stable.
+*/}}
+{{- define "mailhog.renderLabels" -}}
+{{- range $k, $v := . }}
+{{ $k }}: {{ $v | toString | quote }}
+{{- end }}
+{{- end -}}
+
+{{/*
 Identity labels plus `mailhog.commonLabels`. The deploy layer stamps the
 deployment-metadata taxonomy (app.togglecorp.com/*) through commonLabels;
 `app.kubernetes.io/*` here always wins, and the selector never reads
@@ -98,7 +113,7 @@ Deployment for a version number.
   "app.kubernetes.io/name" (include "mailhog.name" .)
   "app.kubernetes.io/instance" .Release.Name
   "app.kubernetes.io/component" "mail-catcher" -}}
-{{- merge $own (deepCopy (default dict .Values.mailhog.commonLabels)) | toYaml -}}
+{{- include "mailhog.renderLabels" (merge $own (deepCopy (default dict .Values.mailhog.commonLabels))) | trim -}}
 {{- end -}}
 
 {{- define "mailhog.labels" -}}
@@ -111,5 +126,5 @@ Deployment for a version number.
 {{- if .Chart.AppVersion -}}
 {{- $_ := set $own "app.kubernetes.io/version" .Chart.AppVersion -}}
 {{- end -}}
-{{- merge $own (deepCopy (default dict .Values.mailhog.commonLabels)) | toYaml -}}
+{{- include "mailhog.renderLabels" (merge $own (deepCopy (default dict .Values.mailhog.commonLabels))) | trim -}}
 {{- end -}}

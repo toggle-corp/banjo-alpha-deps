@@ -431,6 +431,33 @@ tests:
           value: mail-catcher
         template: templates/mailhog/deployment.yaml
 
+  - it: quotes a numeric commonLabel value instead of emitting a bare number
+    # The deploy layer substitutes __BANJO_INSTANCE_ID__ textually, so an instance
+    # id reaches the chart as the number 11. A bare number is not a legal label
+    # value — the API server rejects the object with "got number, want string".
+    set:
+      mailhog.enabled: true
+      mailhog.persistence.enabled: true
+      mailhog.commonLabels:
+        app.togglecorp.com/instance: 11
+    asserts:
+      - equal:
+          path: metadata.labels["app.togglecorp.com/instance"]
+          value: "11"
+        template: templates/mailhog/deployment.yaml
+      - equal:
+          path: spec.template.metadata.labels["app.togglecorp.com/instance"]
+          value: "11"
+        template: templates/mailhog/deployment.yaml
+      - equal:
+          path: metadata.labels["app.togglecorp.com/instance"]
+          value: "11"
+        template: templates/mailhog/service.yaml
+      - equal:
+          path: metadata.labels["app.togglecorp.com/instance"]
+          value: "11"
+        template: templates/mailhog/pvc.yaml
+
   - it: keeps commonLabels out of the immutable selector
     set:
       mailhog.enabled: true
