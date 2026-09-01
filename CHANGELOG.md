@@ -1,5 +1,13 @@
 # Changelog
 
+## [v0.3.0](https://github.com/toggle-corp/banjo-alpha-deps/compare/v0.2.0..v0.3.0) - 2026-09-01
+### Changes:
+
+#### 🚀  Features
+
+- *(chart)* [**breaking**] Bound Postgres disk spill, lock pileups and node ephemeral storage - ([e8b206c](https://github.com/toggle-corp/banjo-alpha-deps/commit/e8b206cbc056c17dddd70a452b202339f468e48d))
+
+
 ## [v0.2.0](https://github.com/toggle-corp/banjo-alpha-deps/compare/v0.1.0..v0.2.0) - 2026-08-13
 ### Changes:
 
