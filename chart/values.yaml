@@ -32,6 +32,10 @@ tcpg:
   # inputs the chart sizes Postgres from, so raising a limit actually gives
   # Postgres more to work with — on the stock image, raising the limit alone
   # changes nothing, because shared_buffers stays at its 128MB default.
+  #
+  # `ephemeral-storage` is not listed here: it is derived from
+  # `ephemeralStorage` below and injected into both requests and limits. Set it
+  # explicitly here to override the derived value.
   resources:
     requests:
       cpu: 0.1
@@ -51,8 +55,25 @@ tcpg:
   #   - worker counts are derived from the *node's* core count, because a CPU
   #     limit is a CFS quota and not a cpuset — Postgres sees 8–24 cores here
   #     and sizes 8 background workers against a 2-core quota.
+  # Also bounds three things Postgres leaves unbounded by default:
+  #   - temp_file_limit defaults to -1, and query spill goes to `pgsql_tmp`
+  #     inside PGDATA — so one runaway sort can fill the data volume, which is
+  #     worse than an OOM (Postgres PANICs on the next write and the volume needs
+  #     manual cleanup). Derived from `persistence.size`.
+  #   - idle_in_transaction_session_timeout and lock_timeout both default to
+  #     disabled, so one abandoned transaction pins row versions from vacuum,
+  #     blocks DDL, and queues every later statement behind it.
+  # `statement_timeout` is deliberately left unset — see _helpers.tpl.
+  #
   # Also turns on query observability (pg_stat_statements, slow-query and
   # lock-wait logging), which the stock config has none of.
+  #
+  # What this cannot bound: a single backend's parse/plan memory. Postgres has no
+  # GUC for it (every *_work_mem covers one operation; there is no
+  # max_total_backend_memory), so an unbatched multi-row INSERT is limited only
+  # by the cgroup. Measured here, 41,355 rows x 28 columns in one statement
+  # peaked at 599MiB in one backend and spilled nothing; the same rows via COPY
+  # held flat at 3MiB. Batch on the client, or use COPY.
   #
   # This is not a throughput knob: measured on a 704MB dataset, the memory and
   # planner values changed throughput neither way. It exists to make the
@@ -136,6 +157,30 @@ tcpg:
     enabled: true
     size: 128Mi
 
+  # Node ephemeral storage. Every scratch volume the chart mounts is an
+  # `emptyDir` backed by the node's disk, and an emptyDir with no `sizeLimit`
+  # grows until that disk is full — at which point the kubelet reports
+  # DiskPressure and evicts pods, including pods that had nothing to do with the
+  # growth. These sizes bound each volume and are also summed into the
+  # container's `ephemeral-storage` limit, so the kubelet charges this pod.
+  #
+  # Query spill is not budgeted here: Postgres writes `base/pgsql_tmp` inside
+  # PGDATA, so it consumes the PVC and `temp_file_limit` bounds it instead.
+  # /dev/shm is not here either — a Memory-medium emptyDir counts against the
+  # memory limit (see `shm` above).
+  ephemeralStorage:
+    # SOLE gate for the `ephemeral-storage` request/limit. When false the
+    # emptyDir sizeLimits below still render, but no resource is set, so the pod
+    # can consume the node's disk without the kubelet charging it.
+    enabled: true
+    # sizeLimit for /tmp. Postgres writes almost nothing here.
+    tmp: 64Mi
+    # sizeLimit for the unix-socket directory /var/run/postgresql.
+    socket: 16Mi
+    # Headroom over the volume sizes for container logs and the writable layer.
+    # Doubles as the `ephemeral-storage` request.
+    overhead: 512Mi
+
   # Shutdown. Postgres reads SIGTERM as a *smart* shutdown — it waits for every
   # client to disconnect, indefinitely — and SIGINT as a fast shutdown. Getting
   # the smart one means the grace period expires, SIGKILL follows, and the data
@@ -193,6 +238,11 @@ tcpg:
       enabled: false          # SOLE gate; whole block ignored when false
       baseUrl: ""             # e.g. https://example.com
       path: ""                # e.g. /dumps/prod/db.sql.gz
+      # sizeLimit for the /restore emptyDir holding the downloaded dump, and the
+      # restore share of the container's ephemeral-storage limit. Must exceed the
+      # dump as downloaded (compressed, if it is): overshooting gets the pod
+      # evicted mid-restore. Only used while `enabled` is true.
+      diskSize: 8Gi
       # Skip TLS certificate verification for the download (curl -k). Use only
       # when the server presents a self-signed or internal-CA cert. Verify the
       # host out-of-band; this disables MITM protection for the download.

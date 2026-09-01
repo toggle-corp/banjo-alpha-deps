@@ -146,6 +146,15 @@ is how an unparseable quantity is detected.
 {{- end -}}
 
 {{/*
+PGDATA volume size in MiB. `temp_file_limit` is derived from this because
+Postgres writes query spill to `base/pgsql_tmp` *inside* PGDATA, so temp files
+consume the data volume rather than node ephemeral storage.
+*/}}
+{{- define "tcpg.dataSizeMi" -}}
+{{- include "tcpg.quantityToMi" (dig "size" "1Gi" (default dict .Values.tcpg.persistence)) -}}
+{{- end -}}
+
+{{/*
 CPU limit as whole cores (floor, minimum 1). Worker counts must follow the
 *limit*, not the node: a CPU limit is a CFS quota, not a cpuset, so Postgres
 sees every core on the node (8–24 here) and would otherwise size 8 background
@@ -215,6 +224,41 @@ charged against the container's memory limit, so it must be budgeted):
                   simply wrong at a 1Gi limit — it tells the planner it has 4x
                   the cache that exists.
 
+Disk, with D = persistence.size:
+
+  temp_file_limit 50% of D, clamped to 64MB..8192MB. Postgres defaults this to
+                  -1 (unlimited) and writes query spill to `base/pgsql_tmp`
+                  *inside* PGDATA, so one runaway sort can fill the data volume
+                  — and a full PGDATA is worse than an OOM: Postgres PANICs on
+                  the next write and the volume needs manual cleanup before it
+                  will start. Note the limit is per *process*, not cluster-wide,
+                  so this bounds a single runaway query rather than the total.
+
+Pileup guards. Postgres ships both of these disabled:
+
+  idle_in_transaction_session_timeout
+                  10min. A session that opens a transaction and stops holds its
+                  snapshot open, which pins every row version behind it from
+                  vacuum and blocks DDL.
+  lock_timeout    60s. Bounds how long one statement waits behind a lock instead
+                  of queueing every later statement behind it too.
+
+`statement_timeout` is deliberately NOT set. It cannot bound the memory class
+that matters here — a single huge multi-row INSERT allocates its parse and plan
+trees before execution starts, and cancellation only lands at a
+CHECK_FOR_INTERRUPTS() point, which the raw parser does not poll — while it
+*would* break the legitimate long statements this chart has to support (dump
+restore, migrations, bulk loads). Set it per-instance via `parameters`.
+
+Nothing below bounds a single backend's parse/plan memory, because Postgres
+offers no knob for it: every *_work_mem GUC covers one *operation* (query
+workspace, maintenance, autovacuum, logical decoding), and there is no
+`max_total_backend_memory`. Measured on this config, an unbatched 41,355-row
+`INSERT ... VALUES` (28 columns, ~21MB of SQL text) peaked at 599MiB of private
+memory in one backend and spilled nothing to disk, while the same rows via
+`COPY` held flat at 3MiB. Bound that on the client: batch the insert, or use
+COPY. The budget below models steady-state backends, not that.
+
 Throughput note: measured on a 704MB dataset, none of the memory or planner
 values below changed throughput either way. They are here so the planner's model
 matches reality and so memory is bounded — not for a speed number.
@@ -233,8 +277,12 @@ matches reality and so memory is bounded — not for a speed number.
 {{- fail (printf "tcpg: resources.limits.memory (%dMi) leaves only %dMi for client connections after shared_buffers %dMi + /dev/shm %dMi + %dMi fixed overhead + %d autovacuum workers x %dMi. Raise resources.limits.memory, or lower tcpg.shm.size." $limitMi $connBudget $sb $shmMi $reserve $avWorkers $avWorkMem) -}}
 {{- end -}}
 {{- $maxConn := min 200 (div (div (mul $connBudget 9) 10) 10) -}}
+{{- $dataMi := include "tcpg.dataSizeMi" . | int -}}
 shared_buffers: "{{ $sb }}MB"
 effective_cache_size: "{{ add $sb (div $connBudget 2) }}MB"
+temp_file_limit: "{{ min 8192 (max 64 (div $dataMi 2)) }}MB"
+idle_in_transaction_session_timeout: "10min"
+lock_timeout: "60s"
 work_mem: "4MB"
 maintenance_work_mem: "{{ min 1024 (max 64 (div $limitMi 10)) }}MB"
 autovacuum_work_mem: "{{ $avWorkMem }}MB"
@@ -310,6 +358,65 @@ on top (user wins), then budget-checked. Emitted as YAML for fromYaml.
 {{- include "tcpg.validateParameters" (dict "params" $final "root" .) -}}
 {{- end -}}
 {{- toYaml $final -}}
+{{- end -}}
+
+{{/*
+============================ ephemeral storage ================================
+Every scratch volume the chart mounts is an `emptyDir` on the node's disk. With
+no `sizeLimit` an emptyDir grows until that disk is full, at which point the
+kubelet reports DiskPressure and evicts pods — including pods that had nothing
+to do with the growth. The sizes are therefore bounded per volume AND summed
+into the container's `ephemeral-storage` limit, so the kubelet charges and
+evicts this pod rather than a bystander.
+
+Query spill is NOT part of this budget: Postgres writes `base/pgsql_tmp` inside
+PGDATA, which is the PVC, and `temp_file_limit` bounds it instead.
+*/}}
+
+{{/*
+Total ephemeral-storage limit in MiB: the bounded emptyDirs plus headroom for
+container logs and the writable layer. /dev/shm is excluded — a Memory-medium
+emptyDir is charged to the memory limit, not to ephemeral storage.
+*/}}
+{{- define "tcpg.ephemeralLimitMi" -}}
+{{- $e := .Values.tcpg.ephemeralStorage -}}
+{{- $total := add (include "tcpg.quantityToMi" $e.tmp | int) (include "tcpg.quantityToMi" $e.socket | int) -}}
+{{- $total = add $total (include "tcpg.quantityToMi" $e.overhead | int) -}}
+{{- if .Values.tcpg.init.restore.enabled -}}
+{{- $total = add $total (include "tcpg.quantityToMi" .Values.tcpg.init.restore.diskSize | int) -}}
+{{- end -}}
+{{- /*
+Without persistence the whole database lives in an emptyDir, so PGDATA is
+ephemeral storage too and has to be inside the limit.
+*/ -}}
+{{- if not .Values.tcpg.persistence.enabled -}}
+{{- $total = add $total (include "tcpg.dataSizeMi" . | int) -}}
+{{- end -}}
+{{- $total -}}
+{{- end -}}
+
+{{/*
+`resources` with `ephemeral-storage` injected. An explicit ephemeral-storage in
+`tcpg.resources` wins, so this only fills a gap. Emits nothing when the merged
+result is empty, so the caller's `with` renders no `resources:` key at all.
+*/}}
+{{- define "tcpg.resources" -}}
+{{- $res := deepCopy (default dict .Values.tcpg.resources) -}}
+{{- if .Values.tcpg.ephemeralStorage.enabled -}}
+{{- $req := deepCopy (default dict (get $res "requests")) -}}
+{{- $lim := deepCopy (default dict (get $res "limits")) -}}
+{{- if not (hasKey $req "ephemeral-storage") -}}
+{{- $_ := set $req "ephemeral-storage" (printf "%dMi" (include "tcpg.quantityToMi" .Values.tcpg.ephemeralStorage.overhead | int)) -}}
+{{- end -}}
+{{- if not (hasKey $lim "ephemeral-storage") -}}
+{{- $_ := set $lim "ephemeral-storage" (printf "%dMi" (include "tcpg.ephemeralLimitMi" . | int)) -}}
+{{- end -}}
+{{- $_ := set $res "requests" $req -}}
+{{- $_ := set $res "limits" $lim -}}
+{{- end -}}
+{{- if $res -}}
+{{- toYaml $res -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "tcpg.selectorLabels" -}}

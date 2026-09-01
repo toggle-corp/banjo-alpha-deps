@@ -1,4 +1,4 @@
-suite: tcpg tuning (parameters, /dev/shm, shutdown)
+suite: tcpg tuning (parameters, /dev/shm, disk and pileup guards, shutdown)
 templates:
   - tcpg/postgres.yaml
   - tcpg/secrets.yaml
@@ -26,6 +26,10 @@ tests:
             - -c
             - effective_cache_size=496MB
             - -c
+            - idle_in_transaction_session_timeout=10min
+            - -c
+            - lock_timeout=60s
+            - -c
             - log_autovacuum_min_duration=0
             - -c
             - log_lock_waits=on
@@ -51,6 +55,8 @@ tests:
             - shared_buffers=256MB
             - -c
             - shared_preload_libraries=pg_stat_statements
+            - -c
+            - temp_file_limit=512MB
             - -c
             - track_io_timing=on
             - -c
@@ -98,6 +104,77 @@ tests:
       - contains: { path: "spec.template.spec.containers[0].args", content: track_io_timing=on }
       - contains: { path: "spec.template.spec.containers[0].args", content: log_min_duration_statement=2s }
       - contains: { path: "spec.template.spec.containers[0].args", content: log_lock_waits=on }
+
+  # --- disk and pileup guards -----------------------------------------------
+
+  # Postgres defaults temp_file_limit to -1 and writes query spill to pgsql_tmp
+  # inside PGDATA, so an unbounded sort fills the data volume — worse than an
+  # OOM, because Postgres then PANICs on write and the volume needs manual
+  # cleanup before it will start.
+  - it: bounds per-backend query spill against the data volume size
+    template: tcpg/postgres.yaml
+    asserts:
+      # 50% of the 1Gi default persistence.size
+      - contains: { path: "spec.template.spec.containers[0].args", content: temp_file_limit=512MB }
+
+  - it: scales temp_file_limit with persistence.size, clamped at both ends
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.persistence.size: 20Gi
+    asserts:
+      # 20Gi/2 = 10240MB, clamped at the 8192MB ceiling
+      - contains: { path: "spec.template.spec.containers[0].args", content: temp_file_limit=8192MB }
+
+  - it: applies the temp_file_limit floor on a tiny data volume
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.persistence.size: 64Mi
+    asserts:
+      # 64Mi/2 = 32MB, raised to the 64MB floor
+      - contains: { path: "spec.template.spec.containers[0].args", content: temp_file_limit=64MB }
+
+  - it: lets temp_file_limit be disabled explicitly
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.parameters:
+        temp_file_limit: "-1"
+    asserts:
+      - contains: { path: "spec.template.spec.containers[0].args", content: temp_file_limit=-1 }
+      - notContains: { path: "spec.template.spec.containers[0].args", content: temp_file_limit=512MB }
+
+  # Both default to disabled in Postgres, so one abandoned transaction pins row
+  # versions from vacuum, blocks DDL, and queues later statements behind it.
+  - it: bounds abandoned transactions and lock waits
+    template: tcpg/postgres.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: idle_in_transaction_session_timeout=10min
+      - contains: { path: "spec.template.spec.containers[0].args", content: lock_timeout=60s }
+
+  # statement_timeout cannot bound the parse/plan memory of a huge multi-row
+  # INSERT (allocated before execution, and the raw parser polls no
+  # CHECK_FOR_INTERRUPTS), while it would break dump restore and migrations.
+  - it: leaves statement_timeout unset
+    template: tcpg/postgres.yaml
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: statement_timeout=0
+
+  - it: lets the pileup guards be overridden
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.parameters:
+        lock_timeout: "5s"
+        idle_in_transaction_session_timeout: "0"
+        statement_timeout: "30s"
+    asserts:
+      - contains: { path: "spec.template.spec.containers[0].args", content: lock_timeout=5s }
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: idle_in_transaction_session_timeout=0
+      - contains: { path: "spec.template.spec.containers[0].args", content: statement_timeout=30s }
 
   # --- user overrides -------------------------------------------------------
 

@@ -205,6 +205,7 @@ This block is **first-init only**: the credentials seed the DB the first time it
 - `init.restore.auth.value` — the only secret. Stored in a dedicated **chart-rendered** Secret named `tcpg-restore-credential` (separate from `tcpg-pg-credential` that Postgres reads — prevents the dump auth from leaking into the Postgres container env). Unlike `tcpg-pg-credential`, this is a plain user-supplied value rendered straight from values (no bootstrap Job, no generation), so it is GitOps-safe as-is.
 - `init.restore.auth.existingSecret.{name,key}` — alternative: reference a pre-existing Secret instead of setting `auth.value` inline. Mutually exclusive with inline (template validation fails hard if both are set). `key` has **no default** — set it explicitly; it is required whenever `existingSecret.name` is set.
 - `init.restore.insecureSkipTlsVerify` (default `false`) — `curl -k` for the download. Use only for internal / self-signed hosts.
+- `init.restore.diskSize` (default `8Gi`) — `sizeLimit` for the `/restore` `emptyDir` holding the downloaded dump, and the restore share of the container's `ephemeral-storage` limit. Must exceed the dump **as downloaded** (compressed, if it is): overshooting gets the pod evicted mid-restore, which is the bounded failure — an unbounded `emptyDir` would fill the node's disk instead and get unrelated pods evicted. See [`ephemeralStorage`](#ephemeralstorage--node-disk-budget).
 
 #### Credential bootstrap: how the Secrets are created
 
@@ -268,9 +269,9 @@ Inline (`restore.auth.value`) and external (`restore.auth.existingSecret.name`) 
 
 ### `persistence` — PVC
 
-- `persistence.enabled` (default `true`) — when `false`, uses an `emptyDir` (data lost on pod restart). Only useful for ephemeral testing.
+- `persistence.enabled` (default `true`) — when `false`, uses an `emptyDir` (data lost on pod restart). Only useful for ephemeral testing. The `emptyDir` is bounded by `persistence.size` and added to the [`ephemeral-storage` budget](#ephemeralstorage--node-disk-budget), since the database is then on the node's disk.
 - `persistence.storageClass` (default `local-path`) — the tc-cluster node-local provisioner; it ignores `size` (node disk is the real limit).
-- `persistence.size` (default `1Gi`; ignored by `local-path`).
+- `persistence.size` (default `1Gi`; ignored by `local-path`). Still meaningful while `autoTune` is on even under `local-path`: it is the input for [`temp_file_limit`](#disk-and-pileup-guards), and it bounds the `emptyDir` when `persistence.enabled` is `false`.
 - `persistence.accessModes` (default `[ReadWriteOnce]`).
 
 ### `service`
@@ -282,6 +283,8 @@ Inline (`restore.auth.value`) and external (`restore.auth.existingSecret.name`) 
 Standard Kubernetes resource requests/limits. Defaults to `requests: {cpu: 0.1, memory: 1Gi}` / `limits: {cpu: 2, memory: 1Gi}` (memory request == limit, so the full 1Gi is reserved on the node; CPU is deliberately burstable for dump restore / ad-hoc queries, which puts the pod in the **Burstable** QoS class — Guaranteed would additionally require the CPU request to equal its limit, reserving 2 full cores per instance). Override for larger workloads.
 
 While `autoTune` is on (the default), `limits.memory` and `limits.cpu` are also the inputs the chart sizes Postgres from — so raising a limit actually gives Postgres more to work with. On the stock image it would not: `shared_buffers` stays at its 128MB default no matter how large the limit is, so raising the limit alone reserves cluster memory that Postgres never uses.
+
+`ephemeral-storage` is not in the defaults above: it is derived from [`ephemeralStorage`](#ephemeralstorage--node-disk-budget) and injected into both requests and limits. Set it explicitly here to override the derived value for that field.
 
 ### `autoTune` — size Postgres from the resource limits
 
@@ -301,6 +304,9 @@ Derivation, with `L` = `limits.memory`, `S` = `shm.size`, `C` = `limits.cpu` flo
 |---|---|---|
 | `shared_buffers` | 25% of `L`, clamped to 128MB–4096MB | `256MB` |
 | `effective_cache_size` | `shared_buffers` + half the connection budget | `496MB` |
+| `temp_file_limit` | 50% of `persistence.size`, clamped to 64MB–8192MB | `512MB` |
+| `idle_in_transaction_session_timeout` | fixed | `10min` |
+| `lock_timeout` | fixed | `60s` |
 | `work_mem` | fixed | `4MB` |
 | `maintenance_work_mem` | 10% of `L`, clamped to 64MB–1024MB | `102MB` |
 | `autovacuum_work_mem` | `L`/32, clamped to 16MB–256MB | `32MB` |
@@ -327,6 +333,23 @@ The connection budget is `L − shared_buffers − S − 64MB − (autovacuum_ma
 Note the two other paths that put statement text in the log, neither controlled by this value: `log_min_error_statement` (Postgres default `error`) logs the statement alongside any error, and `log_statement` stays at its default `none`, so ordinary DDL/DML is never logged just for executing.
 
 `pg_stat_statements` is preloaded, and the extension itself is created by the [extension-bootstrap Job](#extensions--create-extension-bootstrap) — no manual `psql` step.
+
+#### Disk and pileup guards
+
+Three parameters Postgres ships unbounded:
+
+- **`temp_file_limit` defaults to `-1`.** Query spill (sorts, hash joins, hash aggregates that exceed `work_mem`) goes to `base/pgsql_tmp` **inside PGDATA**, so it consumes the PVC — not node ephemeral storage. Left unlimited, one runaway sort fills the data volume, and a full PGDATA is worse than an OOM: Postgres PANICs on the next write and the volume needs manual cleanup before it will start again. Note the limit is **per process**, not cluster-wide, so it bounds a single runaway query rather than the aggregate across `max_connections` backends. `log_temp_files: 0` logs every spill, so you can see what is approaching it. Set `temp_file_limit: "-1"` in `parameters` to opt out.
+- **`idle_in_transaction_session_timeout` and `lock_timeout` both default to disabled.** A session that opens a transaction and stops holds its snapshot open, which pins every row version behind it from vacuum and blocks DDL; a statement waiting indefinitely on a lock queues every later statement behind it too. `10min` and `60s` are loose enough for migrations and bulk loads while still bounding the pileup.
+
+**`statement_timeout` is deliberately left unset.** It cannot bound the memory class that actually kills a container here — a huge multi-row `INSERT` allocates its parse and plan trees *before* execution begins, and cancellation only lands at a `CHECK_FOR_INTERRUPTS()` point, which the raw parser does not poll — while it *would* break the long statements this chart has to support (dump restore, migrations, bulk loads). Set it per-instance via `parameters` when a workload warrants it.
+
+#### What the budget cannot bound
+
+Nothing here bounds **a single backend's parse/plan memory**, because Postgres offers no knob for it: every `*_work_mem` GUC covers one *operation* (query workspace, maintenance, autovacuum, logical decoding), and there is no `max_total_backend_memory` in community Postgres. Nor does that memory spill — it is not an executor node.
+
+Measured against this exact config, an unbatched multi-row `INSERT` of 41,355 rows × 28 columns (≈21MB of SQL text) peaked at **599MiB of private memory in one backend** and wrote **zero** temp files; the same rows via `COPY` held flat at **3MiB**, and stayed at 3MiB at 200,000 rows. Per-row cost scaled linearly at ~14.5KiB — roughly 29× the SQL text.
+
+So this is a client-side bound, not a server-side one. In Django, `bulk_create` is the usual way to hit it: the PostgreSQL backend does not override `bulk_batch_size()`, so without an explicit `batch_size=` the ORM emits **one** statement for every object. Pass `batch_size=`, iterate the source queryset with `.iterator(chunk_size=…)`, or use `COPY`. Raising `resources.limits.memory` only moves the row count at which it fails.
 
 Set `autoTune: false` to keep Postgres' own defaults. That also disables the budget checks below, so `parameters` is then passed through unchecked. Because it drops `shared_preload_libraries` too, it is refused while `extensions` still lists `pg_stat_statements` — see below.
 
@@ -411,6 +434,41 @@ ERROR:  could not resize shared memory segment "/PostgreSQL.3382995114" to 16777
 ```
 
 A `Memory`-medium `emptyDir` is charged against the container's memory limit, so `shm.size` is part of the memory budget above. The chart refuses to render when it is smaller than `work_mem × (max_parallel_workers_per_gather + 1)`.
+
+### `ephemeralStorage` — node disk budget
+
+```yaml
+tcpg:
+  ephemeralStorage:
+    enabled: true      # SOLE gate for the ephemeral-storage request/limit
+    tmp: 64Mi          # sizeLimit for /tmp
+    socket: 16Mi       # sizeLimit for /var/run/postgresql
+    overhead: 512Mi    # logs + writable layer; doubles as the request
+```
+
+Every scratch volume the chart mounts is an `emptyDir` backed by the node's disk. An `emptyDir` with **no `sizeLimit` grows until that disk is full**, and the kubelet then reports `DiskPressure` and starts evicting pods — including pods that had nothing to do with the growth. So each volume is bounded individually, and the sizes are also summed into the container's `ephemeral-storage` limit, which makes the kubelet charge and evict *this* pod instead of a bystander.
+
+**How the limit is enforced matters, and it is not what `/dev/shm` does.** A disk-backed `emptyDir` `sizeLimit` is *not* a filesystem quota — a real quota needs the alpha `LocalStorageCapacityIsolationFSQuotaMonitoring` feature gate. The write **succeeds**, and the kubelet's eviction manager notices afterwards and evicts the pod:
+
+```
+Warning  Evicted  pod/tcpg-0  Usage of EmptyDir volume "tmp" exceeds the limit "64Mi".
+```
+
+Measured in the kind e2e suite: a 120Mi write into the 64Mi `/tmp` returned success, then the pod was evicted about a minute later, the StatefulSet replaced it with a fresh `emptyDir`, and PGDATA on the PVC was untouched. So the failure mode is a pod restart, not a write error — the guard bounds *which* pod dies, not the write. `shm.size` is different: a `Memory`-medium `emptyDir` is a tmpfs mounted **at** `sizeLimit`, so writes past it hard-fail with `No space left on device` immediately.
+
+| volume | sizeLimit | in the budget |
+|---|---|---|
+| `/tmp` | `ephemeralStorage.tmp` | always |
+| `/var/run/postgresql` | `ephemeralStorage.socket` | always |
+| `/restore` | `init.restore.diskSize` | only while `init.restore.enabled` |
+| `pg-data` | `persistence.size` | only while `persistence.enabled: false` |
+| `/dev/shm` | `shm.size` | **no** — a `Memory`-medium `emptyDir` counts against the *memory* limit |
+
+`limits.ephemeral-storage` is the sum of the volumes in the budget plus `overhead`; `requests.ephemeral-storage` is `overhead` alone. At the defaults that is `64 + 16 + 512 = 592Mi` limit / `512Mi` request, and `8784Mi` with restore enabled.
+
+Query spill is **not** in this budget — Postgres writes `base/pgsql_tmp` inside PGDATA, so it lands on the PVC and [`temp_file_limit`](#disk-and-pileup-guards) bounds it.
+
+Setting `ephemeral-storage` explicitly under `resources` overrides the derived value for that one field, and `enabled: false` drops the resource entirely while keeping the volume `sizeLimit`s.
 
 ### `terminationGracePeriodSeconds` — clean shutdown
 

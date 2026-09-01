@@ -18,6 +18,13 @@
 #     actually enforced
 #   - that the derived max_connections makes Postgres refuse a connection rather
 #     than let the kernel OOM-kill the cluster
+#   - that temp_file_limit turns a runaway sort into one failed query instead of
+#     a filled data volume, and that lifting it lets the identical sort through
+#   - how a *disk-backed* emptyDir sizeLimit is actually enforced. It is not a
+#     filesystem quota: the write succeeds and the kubelet evicts this pod. That
+#     differs from the Memory-medium /dev/shm above, which hard-fails on write,
+#     and the difference is what the ephemeral-storage budget rests on.
+#   - that lock_timeout and idle_in_transaction_session_timeout fire
 #   - that the pre-install/pre-upgrade secret-bootstrap Jobs work, credentials
 #     are preserved across upgrades, and PGDATA survives a rollout
 #
@@ -700,6 +707,212 @@ pass mailpit "SQLite database on the PVC survived a pod delete"
 
 k delete pod mailclient --wait=false >/dev/null 2>&1 || true
 helm uninstall mailpit-check -n "$NS" >/dev/null 2>&1 || true
+
+# ---------------------------------------------------------------------------
+# Phase 10 — temp_file_limit bounds query spill inside PGDATA
+# ---------------------------------------------------------------------------
+# Query spill goes to base/pgsql_tmp *inside* PGDATA, so it consumes the data
+# volume rather than node ephemeral storage. Unbounded, one runaway sort fills
+# the volume, and a full PGDATA is worse than an OOM: Postgres PANICs on the
+# next write and the volume needs manual cleanup before it will start again.
+tfl=$(psql_q "SELECT setting FROM pg_settings WHERE name='temp_file_limit'" | tr -d ' \r')
+tfl_src=$(psql_q "SELECT source FROM pg_settings WHERE name='temp_file_limit'" | tr -d '\r')
+[ "$tfl" = "524288" ] \
+  || die tempfile "expected temp_file_limit=524288kB (50% of the 1Gi persistence.size), got ${tfl}kB"
+[ "$tfl_src" = "command line" ] \
+  || die tempfile "temp_file_limit came from '$tfl_src', not the chart's -c args"
+pass tempfile "temp_file_limit=512MB derived from persistence.size and applied from the command line"
+
+# A sort far larger than 512MB of spill at the derived 4MB work_mem.
+SPILL_ROWS=12000000
+spill_sql="SELECT count(*) FROM (SELECT md5(g::text) x FROM generate_series(1,$SPILL_ROWS) g ORDER BY 1) s"
+restarts_before=$(k get pod tcpg-0 -o jsonpath='{.status.containerStatuses[0].restartCount}')
+
+echo "==> [tempfile] running a sort that overruns the 512MB spill budget..."
+spill_out=$(k exec tcpg-0 -c pg -- psql -U postgres -d postgres -tAc "$spill_sql" 2>&1 || true)
+grep -q 'temporary file size exceeds' <<<"$spill_out" \
+  || die tempfile "expected the runaway sort to be refused, got: $(tail -2 <<<"$spill_out")"
+grep -q '524288' <<<"$spill_out" \
+  || die tempfile "the error should name the chart's limit, got: $(tail -2 <<<"$spill_out")"
+pass tempfile "a runaway sort is refused, and the error names the chart's 524288kB limit"
+
+# The whole point of the guard: ONE query fails. The cluster must not have
+# crash-recovered, and the spill files must be reclaimed.
+restarts_after=$(k get pod tcpg-0 -o jsonpath='{.status.containerStatuses[0].restartCount}')
+[ "$restarts_before" = "$restarts_after" ] \
+  || die tempfile "the container restarted ($restarts_before -> $restarts_after) instead of failing one query"
+[ "$(psql_q 'SELECT 1' | tr -d ' \r')" = "1" ] || die tempfile "server unusable after the refused sort"
+# shellcheck disable=SC2016  # $PGDATA must expand in the pod, not on the host
+tmpleft=$(k exec tcpg-0 -c pg -- sh -c 'du -sm "$PGDATA/base/pgsql_tmp" 2>/dev/null | cut -f1' | tr -d ' \r')
+[ "${tmpleft:-0}" -lt 64 ] || die tempfile "pgsql_tmp was not reclaimed (${tmpleft}Mi still there)"
+pass tempfile "bounded failure: one query refused, cluster up, pgsql_tmp reclaimed (${tmpleft:-0}Mi)"
+
+# A/B on temp_file_limit alone: identical query, limit lifted for this session
+# only. This is what makes the refusal attributable to the chart's value rather
+# than to the query being invalid.
+echo "==> [tempfile] A/B — same sort with the limit lifted for one session..."
+ab_out=$(k exec tcpg-0 -c pg -- psql -U postgres -d postgres -tAc \
+  "SET temp_file_limit='-1'; $spill_sql" 2>&1 | tr -d ' \r' || true)
+grep -qx "$SPILL_ROWS" <<<"$ab_out" \
+  || die tempfile "the identical sort should succeed with the limit lifted, got: $(tail -2 <<<"$ab_out")"
+pass tempfile "the identical sort succeeds at temp_file_limit=-1 — the chart's value is what refused it"
+
+# ---------------------------------------------------------------------------
+# Phase 11 — emptyDir sizeLimits and the ephemeral-storage budget
+# ---------------------------------------------------------------------------
+eph_req=$(k get pod tcpg-0 -o jsonpath="{.spec.containers[0].resources.requests['ephemeral-storage']}")
+eph_lim=$(k get pod tcpg-0 -o jsonpath="{.spec.containers[0].resources.limits['ephemeral-storage']}")
+[ "$eph_req" = "512Mi" ] || die ephemeral "expected ephemeral-storage request 512Mi (overhead), got '$eph_req'"
+[ "$eph_lim" = "592Mi" ] || die ephemeral "expected ephemeral-storage limit 592Mi (64+16+512), got '$eph_lim'"
+pass ephemeral "ephemeral-storage request/limit derived as 512Mi/592Mi"
+
+for spec in "tmp|64Mi" "run-postgresql|16Mi"; do
+  vol="${spec%%|*}"; want="${spec##*|}"
+  got=$(k get pod tcpg-0 -o jsonpath="{.spec.volumes[?(@.name=='$vol')].emptyDir.sizeLimit}")
+  [ "$got" = "$want" ] || die ephemeral "$vol sizeLimit is '$got', expected $want"
+done
+pass ephemeral "every disk-backed emptyDir carries a sizeLimit (tmp 64Mi, socket 16Mi)"
+
+# A disk-backed emptyDir sizeLimit is NOT a filesystem quota: the write
+# succeeds, and the kubelet's eviction manager then evicts THIS pod, naming the
+# volume and the limit. That is the whole value of setting it — without a
+# sizeLimit the volume grows until the NODE's disk fills, and the kubelet then
+# evicts by node-level DiskPressure, which can take out unrelated pods.
+#
+# Contrast /dev/shm in the shm phase: a Memory-medium emptyDir is a tmpfs
+# mounted AT sizeLimit, so writes there hard-fail with ENOSPC instead. A real
+# quota on a disk-backed volume would need the alpha
+# LocalStorageCapacityIsolationFSQuotaMonitoring feature gate.
+psql_q "DROP TABLE IF EXISTS evict_marker" >/dev/null 2>&1
+psql_q "CREATE TABLE evict_marker(id int); INSERT INTO evict_marker VALUES (7)" >/dev/null
+uid_before=$(k get pod tcpg-0 -o jsonpath='{.metadata.uid}')
+evicted_before=$(k get events --field-selector reason=Evicted \
+  -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' 2>/dev/null | grep -c 'EmptyDir volume "tmp"' || true)
+
+echo "==> [ephemeral] writing 120Mi into a 64Mi /tmp and waiting for the kubelet..."
+dd_out=$(k exec tcpg-0 -c pg -- sh -c 'dd if=/dev/zero of=/tmp/fill bs=1M count=120 2>&1 | tail -1' || true)
+grep -qiE 'no space left|disk quota' <<<"$dd_out" \
+  && die ephemeral "the write hard-failed; a disk-backed emptyDir is not expected to be quota-enforced: $dd_out"
+pass ephemeral "the write itself succeeds — a disk-backed sizeLimit is not a filesystem quota"
+
+evicted_now=$evicted_before
+for _ in $(seq 1 90); do
+  evicted_now=$(k get events --field-selector reason=Evicted \
+    -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' 2>/dev/null | grep -c 'EmptyDir volume "tmp"' || true)
+  [ "${evicted_now:-0}" -gt "${evicted_before:-0}" ] && break
+  sleep 2
+done
+[ "${evicted_now:-0}" -gt "${evicted_before:-0}" ] \
+  || die ephemeral "kubelet never evicted the pod for exceeding the tmp sizeLimit (waited 180s)"
+k get events --field-selector reason=Evicted -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' \
+  | grep -q '64Mi' || die ephemeral "the eviction message should name the 64Mi limit"
+pass ephemeral "kubelet evicted THIS pod, naming the volume and its 64Mi limit"
+
+# The bound is on the scratch volume, not the database: the StatefulSet brings
+# the pod back with a fresh emptyDir and PGDATA intact on the PVC.
+for _ in $(seq 1 90); do
+  uid_after=$(k get pod tcpg-0 -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+  [ -n "${uid_after:-}" ] && [ "$uid_after" != "$uid_before" ] && break
+  sleep 2
+done
+[ "${uid_after:-}" != "$uid_before" ] || die ephemeral "the evicted pod was never replaced"
+wait_ready || die ephemeral "the replacement pod never became ready"
+tmp_used=$(k exec tcpg-0 -c pg -- sh -c 'du -sm /tmp | cut -f1' | tr -d ' \r')
+[ "${tmp_used:-99}" -lt 8 ] || die ephemeral "/tmp came back with ${tmp_used}Mi still in it, expected a fresh emptyDir"
+marker=$(psql_q "SELECT id FROM evict_marker" | tr -d ' \r')
+[ "$marker" = "7" ] || die ephemeral "PGDATA did not survive the eviction (marker='$marker')"
+psql_q "DROP TABLE evict_marker" >/dev/null
+pass ephemeral "the pod came back with a fresh /tmp and PGDATA intact on the PVC"
+
+# ---------------------------------------------------------------------------
+# Phase 12 — pileup guards: lock_timeout, idle_in_transaction_session_timeout
+# ---------------------------------------------------------------------------
+# Postgres ships both disabled. An abandoned transaction holds its snapshot
+# open, which pins every row version behind it from vacuum and blocks DDL; a
+# statement waiting forever on a lock queues every later statement behind it.
+for spec in "lock_timeout|60000" "idle_in_transaction_session_timeout|600000" "statement_timeout|0"; do
+  name="${spec%%|*}"; want="${spec##*|}"
+  got=$(psql_q "SELECT setting FROM pg_settings WHERE name='$name'" | tr -d ' \r')
+  [ "$got" = "$want" ] || die timeouts "$name: expected ${want}ms, got ${got}ms"
+done
+pass timeouts "lock_timeout=60s and idle_in_transaction_session_timeout=10min in effect, statement_timeout left off"
+
+# The shipped values are 60s and 10min, too slow to wait out here, so the
+# MECHANISM is proved with the same GUCs scaled down per-session. What the
+# assertions above pin is the shipped value; what these pin is that the GUC
+# actually fires.
+psql_q "SET client_min_messages=warning; DROP TABLE IF EXISTS locktest" >/dev/null
+psql_q "CREATE TABLE locktest(id int)" >/dev/null
+
+# The lock must be held from a SEPARATE pod: a backgrounded `kubectl exec` in
+# the pg pod is reparented to PID 1 — the postmaster — which then reports an
+# untracked child and crash-recovers. See the preStop phase.
+k delete pod pglocker --ignore-not-found --wait=true >/dev/null 2>&1
+kubectl apply -n "$NS" -f - >/dev/null <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pglocker
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: hold
+      image: postgres:18.1
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+      envFrom:
+        - secretRef: {name: tcpg-pg-credential}
+      command: [sh, -c]
+      args: ['exec psql "$POSTGRES_URI" -c "begin; lock table locktest in access exclusive mode; select pg_sleep(90);"']
+EOF
+held=0
+for _ in $(seq 1 40); do
+  held=$(psql_q "SELECT count(*) FROM pg_locks l JOIN pg_class c ON c.oid = l.relation
+                 WHERE c.relname='locktest' AND l.mode='AccessExclusiveLock' AND l.granted" | tr -d ' \r')
+  [ "${held:-0}" -ge 1 ] && break
+  sleep 1
+done
+[ "${held:-0}" -ge 1 ] || die timeouts "the locker pod never acquired the AccessExclusiveLock"
+
+# Same query, same held lock, different guard armed — so the error identifies
+# which guard fired rather than just "it failed".
+lt_out=$(k exec tcpg-0 -c pg -- psql -U postgres -d postgres -tAc \
+  "SET lock_timeout='2s'; SELECT count(*) FROM locktest" 2>&1 || true)
+grep -q 'canceling statement due to lock timeout' <<<"$lt_out" \
+  || die timeouts "expected a lock timeout behind the held lock, got: $(tail -2 <<<"$lt_out")"
+pass timeouts "lock_timeout cancels a statement waiting behind an AccessExclusiveLock"
+
+# Negative control: with lock_timeout off the identical query blocks until some
+# OTHER guard stops it, which is what an unbounded wait looks like.
+st_out=$(k exec tcpg-0 -c pg -- psql -U postgres -d postgres -tAc \
+  "SET lock_timeout='0'; SET statement_timeout='3s'; SELECT count(*) FROM locktest" 2>&1 || true)
+grep -q 'canceling statement due to statement timeout' <<<"$st_out" \
+  || die timeouts "control: with lock_timeout off the query should block, got: $(tail -2 <<<"$st_out")"
+pass timeouts "control — with lock_timeout off the identical query blocks instead of returning"
+
+k delete pod pglocker --ignore-not-found --wait=false >/dev/null 2>&1 || true
+
+# Idleness has to be real: statements batched into one psql -c run as a single
+# round trip, so the session is never idle between them. `\! sleep` puts the
+# delay on the client side, between two server round trips.
+idle_out=$(k exec -i tcpg-0 -c pg -- psql -U postgres -d postgres 2>&1 <<'SQL' || true
+SET idle_in_transaction_session_timeout='2s';
+BEGIN;
+SELECT 1;
+\! sleep 5
+SELECT 1;
+SQL
+)
+grep -qi 'idle-in-transaction' <<<"$idle_out" \
+  || die timeouts "expected the idle transaction to be terminated, got: $(tail -3 <<<"$idle_out")"
+pass timeouts "idle_in_transaction_session_timeout terminates a session idle inside a transaction"
+
+psql_q "SET client_min_messages=warning; DROP TABLE IF EXISTS locktest" >/dev/null
 
 echo
 echo "All e2e tests passed."

@@ -216,9 +216,9 @@ spec:
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 3
-          {{- with .Values.tcpg.resources }}
+          {{- with include "tcpg.resources" . }}
           resources:
-            {{- toYaml . | nindent 12 }}
+            {{- . | nindent 12 }}
           {{- end }}
           volumeMounts:
             - name: pg-data
@@ -260,12 +260,21 @@ spec:
           persistentVolumeClaim:
             claimName: {{ template "tcpg.fullname" . }}-pg-data
           {{- else }}
-          emptyDir: {}
+          # Without a PVC the whole database is node ephemeral storage, so it is
+          # bounded by the same size the PVC would have had.
+          emptyDir:
+            sizeLimit: {{ .Values.tcpg.persistence.size }}
           {{- end }}
+        # An emptyDir with no sizeLimit grows until the node's disk is full, and
+        # the kubelet then evicts pods under DiskPressure — including unrelated
+        # ones. With a sizeLimit the kubelet evicts this pod instead, naming the
+        # volume. Query spill is not here: it goes to pgsql_tmp inside PGDATA.
         - name: tmp
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: {{ .Values.tcpg.ephemeralStorage.tmp }}
         - name: run-postgresql
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: {{ .Values.tcpg.ephemeralStorage.socket }}
         {{- if .Values.tcpg.shm.enabled }}
         # Parallel workers build hash tables here; the 64Mi Kubernetes default
         # makes such queries fail outright rather than run slowly.
@@ -275,8 +284,13 @@ spec:
             sizeLimit: {{ .Values.tcpg.shm.size }}
         {{- end }}
         {{- if .Values.tcpg.init.restore.enabled }}
+        # Holds the downloaded dump. Exceeding this gets the pod evicted by the
+        # kubelet (a disk-backed sizeLimit is not a filesystem quota, so the write
+        # itself succeeds) — bounded to this pod, where an unbounded emptyDir
+        # would fill the node and evict bystanders under DiskPressure.
         - name: restore
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: {{ .Values.tcpg.init.restore.diskSize }}
         - name: restore-script
           configMap:
             name: {{ template "tcpg.fullname" . }}-restore

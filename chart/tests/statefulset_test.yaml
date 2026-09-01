@@ -44,10 +44,10 @@ tests:
           content: { name: run-postgresql, mountPath: /var/run/postgresql }
       - contains:
           path: spec.template.spec.volumes
-          content: { name: tmp, emptyDir: {} }
+          content: { name: tmp, emptyDir: { sizeLimit: 64Mi } }
       - contains:
           path: spec.template.spec.volumes
-          content: { name: run-postgresql, emptyDir: {} }
+          content: { name: run-postgresql, emptyDir: { sizeLimit: 16Mi } }
 
   - it: init container meets restricted PSS
     template: tcpg/postgres.yaml
@@ -471,6 +471,112 @@ tests:
       - equal:
           path: spec.template.spec.containers[0].resources.requests.memory
           value: 1Gi
+
+  # --- ephemeral storage -----------------------------------------------------
+  # An emptyDir with no sizeLimit grows until the node's disk is full, and the
+  # kubelet then evicts pods under DiskPressure — including unrelated ones. The
+  # volumes are bounded individually and summed into ephemeral-storage so the
+  # kubelet charges this pod.
+
+  - it: derives ephemeral-storage from the bounded volumes plus overhead
+    template: tcpg/postgres.yaml
+    asserts:
+      # tmp 64 + socket 16 + overhead 512
+      - equal:
+          path: 'spec.template.spec.containers[0].resources.limits["ephemeral-storage"]'
+          value: 592Mi
+      - equal:
+          path: 'spec.template.spec.containers[0].resources.requests["ephemeral-storage"]'
+          value: 512Mi
+
+  - it: includes the dump volume in the ephemeral-storage limit when restore is enabled
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.init.restore.enabled: true
+      tcpg.init.restore.baseUrl: https://example.com
+      tcpg.init.restore.path: /d.dump
+    asserts:
+      # 64 + 16 + 512 + 8Gi
+      - equal:
+          path: 'spec.template.spec.containers[0].resources.limits["ephemeral-storage"]'
+          value: 8784Mi
+      - contains:
+          path: spec.template.spec.volumes
+          content: { name: restore, emptyDir: { sizeLimit: 8Gi } }
+
+  - it: sizes the dump volume and the limit from init.restore.diskSize
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.init.restore.enabled: true
+      tcpg.init.restore.baseUrl: https://example.com
+      tcpg.init.restore.path: /d.dump
+      tcpg.init.restore.diskSize: 32Gi
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content: { name: restore, emptyDir: { sizeLimit: 32Gi } }
+      - equal:
+          path: 'spec.template.spec.containers[0].resources.limits["ephemeral-storage"]'
+          value: 33360Mi
+
+  # Without a PVC the whole database is node ephemeral storage, so it has to be
+  # bounded and inside the limit too.
+  - it: bounds the pg-data emptyDir and budgets it when persistence is disabled
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.persistence.enabled: false
+      tcpg.persistence.size: 4Gi
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[0].emptyDir.sizeLimit
+          value: 4Gi
+      # 64 + 16 + 512 + 4Gi
+      - equal:
+          path: 'spec.template.spec.containers[0].resources.limits["ephemeral-storage"]'
+          value: 4688Mi
+
+  - it: honours explicit ephemeral-storage in resources over the derived value
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.resources.limits.ephemeral-storage: 20Gi
+    asserts:
+      - equal:
+          path: 'spec.template.spec.containers[0].resources.limits["ephemeral-storage"]'
+          value: 20Gi
+      # the request is still derived
+      - equal:
+          path: 'spec.template.spec.containers[0].resources.requests["ephemeral-storage"]'
+          value: 512Mi
+
+  - it: keeps the volume sizeLimits but sets no resource when ephemeralStorage is off
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.ephemeralStorage.enabled: false
+    asserts:
+      - notExists:
+          path: 'spec.template.spec.containers[0].resources.limits["ephemeral-storage"]'
+      - notExists:
+          path: 'spec.template.spec.containers[0].resources.requests["ephemeral-storage"]'
+      - contains:
+          path: spec.template.spec.volumes
+          content: { name: tmp, emptyDir: { sizeLimit: 64Mi } }
+
+  - it: scales the limit with the configured volume sizes
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.ephemeralStorage.tmp: 1Gi
+      tcpg.ephemeralStorage.socket: 32Mi
+      tcpg.ephemeralStorage.overhead: 256Mi
+    asserts:
+      - equal:
+          path: 'spec.template.spec.containers[0].resources.limits["ephemeral-storage"]'
+          value: 1312Mi
+      - equal:
+          path: 'spec.template.spec.containers[0].resources.requests["ephemeral-storage"]'
+          value: 256Mi
+      - contains:
+          path: spec.template.spec.volumes
+          content: { name: tmp, emptyDir: { sizeLimit: 1Gi } }
 
   - it: renders nodeSelector when set
     template: tcpg/postgres.yaml
