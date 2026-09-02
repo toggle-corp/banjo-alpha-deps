@@ -1,5 +1,13 @@
 # Changelog
 
+## [v0.4.0](https://github.com/toggle-corp/banjo-alpha-deps/compare/v0.3.0..v0.4.0) - 2026-09-02
+### Changes:
+
+#### 🚀  Features
+
+- *(chart)* [**breaking**] Scale work_mem with the memory limit - ([5b8feb4](https://github.com/toggle-corp/banjo-alpha-deps/commit/5b8feb4a307bddd4d146f759457b3c83759aab53))
+
+
 ## [v0.3.0](https://github.com/toggle-corp/banjo-alpha-deps/compare/v0.2.0..v0.3.0) - 2026-09-01
 ### Changes:
 
