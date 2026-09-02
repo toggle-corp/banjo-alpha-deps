@@ -75,6 +75,69 @@ tests:
       # connection budget is large, so the 200 cap applies
       - contains: { path: "spec.template.spec.containers[0].args", content: max_connections=200 }
 
+  # --- work_mem scaling ------------------------------------------------------
+  # Postgres' own 4MB default never scales, so on a large instance every sort
+  # and hash spills to disk. work_mem is the inverse of the max_connections
+  # division, so the two stay consistent: the per-backend allowance goes to
+  # connections until max_connections caps at 200, and the surplus after that
+  # goes to work_mem.
+
+  - it: keeps work_mem at 4MB on small instances, where connections take the budget
+    template: tcpg/postgres.yaml
+    asserts:
+      # 1Gi: (90% of 480Mi budget) / 43 conns - 6Mi overhead = 4Mi
+      - contains: { path: "spec.template.spec.containers[0].args", content: work_mem=4MB }
+
+  - it: scales work_mem once max_connections has hit its cap
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.resources.limits.memory: 16Gi
+    asserts:
+      # (90% of 11328Mi budget) / 200 conns - 6Mi = 44Mi
+      - contains: { path: "spec.template.spec.containers[0].args", content: work_mem=44MB }
+      - contains: { path: "spec.template.spec.containers[0].args", content: max_connections=200 }
+
+  - it: caps work_mem at 64MB however large the limit gets
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.resources.limits.memory: 64Gi
+    asserts:
+      # work_mem is charged per sort *node*, not per backend, so the allowance
+      # is not handed over unbounded.
+      - contains: { path: "spec.template.spec.containers[0].args", content: work_mem=64MB }
+
+  # A derived default must not violate the chart's own /dev/shm rule, so it is
+  # clamped rather than left to fail its own render.
+  - it: clamps work_mem to what /dev/shm can hold for parallel workers
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.resources.limits.memory: 16Gi
+      tcpg.resources.limits.cpu: 8
+    asserts:
+      # per_gather 4 -> shm 128Mi / (4+1) = 25Mi, below the 44Mi the budget allows
+      - contains: { path: "spec.template.spec.containers[0].args", content: work_mem=25MB }
+      - contains: { path: "spec.template.spec.containers[0].args", content: max_parallel_workers_per_gather=4 }
+
+  - it: lifts the work_mem clamp when /dev/shm is raised to match
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.resources.limits.memory: 16Gi
+      tcpg.resources.limits.cpu: 8
+      tcpg.shm.size: 512Mi
+    asserts:
+      # shm no longer binds (512/5 = 102), so the budget's 44Mi applies again.
+      # The larger shm also shrinks the connection budget, hence 43MB not 44MB.
+      - contains: { path: "spec.template.spec.containers[0].args", content: work_mem=43MB }
+
+  - it: keeps the derived work_mem inside the budget it is checked against
+    template: tcpg/postgres.yaml
+    set:
+      tcpg.resources.limits.memory: 16Gi
+    asserts:
+      # 4096 sb + 128 shm + 64 overhead + 200 x (6 + 44) + 3 x 256 av = 15056Mi
+      # of the 16384Mi limit. Derived values must never trip their own guard.
+      - notFailedTemplate: {}
+
   - it: derives worker counts from the CPU limit, not the node's core count
     template: tcpg/postgres.yaml
     set:

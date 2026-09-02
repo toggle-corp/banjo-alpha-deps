@@ -307,7 +307,7 @@ Derivation, with `L` = `limits.memory`, `S` = `shm.size`, `C` = `limits.cpu` flo
 | `temp_file_limit` | 50% of `persistence.size`, clamped to 64MB–8192MB | `512MB` |
 | `idle_in_transaction_session_timeout` | fixed | `10min` |
 | `lock_timeout` | fixed | `60s` |
-| `work_mem` | fixed | `4MB` |
+| `work_mem` | (90% of the connection budget ÷ `max_connections`) − 6MB, clamped to 4MB–64MB and to `shm.size ÷ (max_parallel_workers_per_gather + 1)` | `4MB` |
 | `maintenance_work_mem` | 10% of `L`, clamped to 64MB–1024MB | `102MB` |
 | `autovacuum_work_mem` | `L`/32, clamped to 16MB–256MB | `32MB` |
 | `autovacuum_max_workers` | pinned, so the budget is knowable | `3` |
@@ -325,6 +325,21 @@ Derivation, with `L` = `limits.memory`, `S` = `shm.size`, `C` = `limits.cpu` flo
 | `log_autovacuum_min_duration` | fixed | `0` (log all) |
 
 The connection budget is `L − shared_buffers − S − 64MB − (autovacuum_max_workers × autovacuum_work_mem)`, where the 64MB covers the postmaster, WAL buffers and other fixed overhead.
+
+`work_mem` is the **inverse of the `max_connections` division**, so the two cannot drift out of the budget they share: the per-backend allowance goes to connections first, and only the surplus left once `max_connections` hits its 200 cap flows into `work_mem`. Postgres' own 4MB default never scales, which on a large instance means every sort and hash spills to disk — visible as `temporary file:` lines and multi-second `FETCH`es — even with gigabytes of `shared_buffers` sitting idle.
+
+| `limits.memory` | `limits.cpu` | `max_connections` | `work_mem` | why |
+|---|---|---|---|---|
+| 512Mi | 2 | 12 | `4MB` | 4MB floor |
+| 1Gi | 2 | 43 | `4MB` | unchanged from the old fixed value |
+| 2Gi | 2 | 103 | `4MB` | budget still going to connections |
+| 4Gi | 2 | 200 | `5MB` | `max_connections` just capped |
+| 8Gi | 2 | 200 | `17MB` | surplus starts flowing to `work_mem` |
+| 16Gi | 2 | 200 | `44MB` | |
+| 16Gi | 8 | 200 | `25MB` | clamped by `shm.size ÷ (per_gather + 1)` |
+| 64Gi | 2 | 200 | `64MB` | 64MB ceiling |
+
+Two ceilings, both deliberate. **64MB** because `work_mem` is charged per *sort node*, not per backend — a query with several sorts multiplies it, so the allowance is not handed over unbounded. **`shm.size ÷ (max_parallel_workers_per_gather + 1)`** because parallel workers build their hash tables in `/dev/shm`, and the rule below would otherwise refuse the chart's own derived value; clamping keeps the default self-consistent, while a *user* override that breaks the same rule still fails closed. Raise `shm.size` to lift that clamp.
 
 `autovacuum_work_mem` and `autovacuum_max_workers` are set explicitly rather than left alone, because Postgres defaults `autovacuum_work_mem` to `-1` — meaning "use `maintenance_work_mem`", which is sized for one-off index builds. Left at the default, three autovacuum workers could each claim `maintenance_work_mem` (102MB at a 1Gi limit) entirely outside the budget. Overriding either one in `parameters` is costed against the budget, including an explicit `-1`.
 

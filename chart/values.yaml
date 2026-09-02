@@ -55,6 +55,10 @@ tcpg:
   #   - worker counts are derived from the *node's* core count, because a CPU
   #     limit is a CFS quota and not a cpuset — Postgres sees 8–24 cores here
   #     and sizes 8 background workers against a 2-core quota.
+  #   - work_mem is 4MB no matter how large the limit is, so on a big instance
+  #     every sort and hash spills to disk while gigabytes of shared_buffers sit
+  #     idle. The chart scales it with the connection budget instead (4MB at
+  #     1Gi, unchanged; 44MB at 16Gi).
   # Also bounds three things Postgres leaves unbounded by default:
   #   - temp_file_limit defaults to -1, and query spill goes to `pgsql_tmp`
   #     inside PGDATA — so one runaway sort can fill the data volume, which is

@@ -218,6 +218,15 @@ charged against the container's memory limit, so it must be budgeted):
                   matters: at a 1Gi limit the stock max_connections of 100 lets
                   the kernel OOM-kill the postmaster, which drops every session
                   and crash-recovers.
+  work_mem        the inverse of that division — (90% of connBudget /
+                  max_connections) - 6MB of backend overhead — so it scales with
+                  the limit and stays consistent with max_connections by
+                  construction. Clamped to 4MB..64MB, and additionally to
+                  shm/(max_parallel_workers_per_gather+1) so the derived value
+                  cannot violate the /dev/shm rule below. 4MB is what the 1Gi
+                  default yields, so small instances are unchanged; a 16Gi limit
+                  gets 44MB. Postgres' own 4MB default never scales, which on a
+                  16Gi instance means every sort and hash spills to disk.
   effective_cache_size
                   shared_buffers + half of connBudget. Under cgroup v2 the page
                   cache is charged to the container, so the stock 4GB default is
@@ -276,14 +285,38 @@ matches reality and so memory is bounded — not for a speed number.
 {{- if le $connBudget 128 -}}
 {{- fail (printf "tcpg: resources.limits.memory (%dMi) leaves only %dMi for client connections after shared_buffers %dMi + /dev/shm %dMi + %dMi fixed overhead + %d autovacuum workers x %dMi. Raise resources.limits.memory, or lower tcpg.shm.size." $limitMi $connBudget $sb $shmMi $reserve $avWorkers $avWorkMem) -}}
 {{- end -}}
-{{- $maxConn := min 200 (div (div (mul $connBudget 9) 10) 10) -}}
+{{- /*
+`connAllow` is the 90% of connBudget that max_connections is sized against;
+work_mem is then the inverse of that same division, so the two cannot drift.
+*/ -}}
+{{- $connAllow := div (mul $connBudget 9) 10 -}}
+{{- $maxConn := min 200 (div $connAllow 10) -}}
+{{- $perGather := max 1 (div $cores 2) -}}
+{{- /*
+work_mem gets whatever the per-backend allowance leaves once the 6Mi of backend
+overhead is taken out, so it scales with the memory limit instead of staying at
+the 4MB the 1Gi default happens to yield. Two ceilings:
+  64MB    a per-sort-node cap — the allowance keeps growing with the limit once
+          max_connections hits its 200 cap, and work_mem is charged per *node*,
+          not per backend, so an unbounded value understates real usage.
+  shm/(max_parallel_workers_per_gather+1)
+          parallel workers build hash tables in /dev/shm, and validateParameters
+          refuses a work_mem larger than it fits. Clamping here keeps the
+          derived default self-consistent rather than failing its own render;
+          a user override that breaks the same rule still fails closed.
+*/ -}}
+{{- $wmCeil := 64 -}}
+{{- if .Values.tcpg.shm.enabled -}}
+{{- $wmCeil = min 64 (div $shmMi (add $perGather 1)) -}}
+{{- end -}}
+{{- $workMem := max 4 (min $wmCeil (sub (div $connAllow $maxConn) 6)) -}}
 {{- $dataMi := include "tcpg.dataSizeMi" . | int -}}
 shared_buffers: "{{ $sb }}MB"
 effective_cache_size: "{{ add $sb (div $connBudget 2) }}MB"
 temp_file_limit: "{{ min 8192 (max 64 (div $dataMi 2)) }}MB"
 idle_in_transaction_session_timeout: "10min"
 lock_timeout: "60s"
-work_mem: "4MB"
+work_mem: "{{ $workMem }}MB"
 maintenance_work_mem: "{{ min 1024 (max 64 (div $limitMi 10)) }}MB"
 autovacuum_work_mem: "{{ $avWorkMem }}MB"
 autovacuum_max_workers: "{{ $avWorkers }}"
