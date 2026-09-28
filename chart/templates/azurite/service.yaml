@@ -1,0 +1,21 @@
+{{- if .Values.azurite.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ template "azurite.fullname" . }}
+  labels:
+    {{- include "azurite.labels" . | nindent 4 }}
+  {{- with .Values.azurite.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.azurite.service.type }}
+  ports:
+    - port: {{ .Values.azurite.service.blobPort }}
+      targetPort: blob
+      protocol: TCP
+      name: blob
+  selector:
+    {{- include "azurite.selectorLabels" . | nindent 4 }}
+{{- end }}

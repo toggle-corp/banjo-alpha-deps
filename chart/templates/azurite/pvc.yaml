@@ -1,0 +1,21 @@
+{{- if and .Values.azurite.enabled .Values.azurite.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ template "azurite.fullname" . }}-data
+  labels:
+    {{- include "azurite.labels" . | nindent 4 }}
+  {{- with .Values.azurite.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.azurite.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  accessModes:
+    {{- toYaml .Values.azurite.persistence.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ required "azurite.persistence.size is required" .Values.azurite.persistence.size | quote }}
+{{- end }}

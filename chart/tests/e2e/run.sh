@@ -27,6 +27,9 @@
 #   - that lock_timeout and idle_in_transaction_session_timeout fire
 #   - that the pre-install/pre-upgrade secret-bootstrap Jobs work, credentials
 #     are preserved across upgrades, and PGDATA survives a rollout
+#   - that Azurite runs hardened, accepts the bootstrap-generated key over
+#     Shared Key auth, refuses the public emulator key, keeps blobs on its PVC,
+#     and rotates its key through the value
 #
 # Env:
 #   CLUSTER_NAME    kind cluster name          (default: tcpg-e2e)
@@ -707,6 +710,225 @@ pass mailpit "SQLite database on the PVC survived a pod delete"
 
 k delete pod mailclient --wait=false >/dev/null 2>&1 || true
 helm uninstall mailpit-check -n "$NS" >/dev/null 2>&1 || true
+
+# ---------------------------------------------------------------------------
+# Phase 9b — azurite: generated key, Shared Key auth, provisioning, persistence, rotation
+# ---------------------------------------------------------------------------
+echo "==> [azurite] installing with chart defaults (PVC on, generated key) + two default containers..."
+# The commonAnnotation value has spaces on purpose: the bootstrap Job used to
+# word-split it into separate kubectl arguments and fail the pre-install hook.
+helm install azurite-check "$CHART_DIR" -n "$NS" --set azurite.enabled=true \
+  --set-json 'azurite.defaultContainers=[{"name":"e2e-public","publicAccess":"blob"},"e2e-private"]' \
+  --set-json 'azurite.commonAnnotations={"e2e/description":"blob store for e2e"}' \
+  --wait --timeout 5m >"$TMPDIR/azurite.log" 2>&1 \
+  || { echo "FAIL [azurite]: helm install failed" >&2; tail -30 "$TMPDIR/azurite.log" >&2
+       k get events --sort-by=.lastTimestamp 2>&1 | tail -20 >&2; exit 1; }
+# The image declares no USER, so this also proves podSecurityContext keeps it
+# off root, and that Azurite runs with a read-only root filesystem.
+pass azurite "admitted under restricted PSS as non-root, readOnlyRootFilesystem, blob port ready"
+
+az_secret() { k get secret azurite-storage-credential -o jsonpath="{.data.$1}" | base64 -d; }
+az_ep=$(az_secret AZURE_STORAGE_BLOB_ENDPOINT)
+[ "$az_ep" = "http://azurite.$NS.svc.cluster.local:10000/devstoreaccount1" ] \
+  || die azurite "AZURE_STORAGE_BLOB_ENDPOINT is '$az_ep'"
+az_key=$(az_secret AZURE_STORAGE_ACCOUNT_KEY)
+[ "$(printf '%s' "$az_key" | base64 -d | wc -c)" = "64" ] \
+  || die azurite "generated key is not 64 bytes of base64: '$az_key'"
+pass azurite "bootstrap Job generated a 64-byte base64 key and the in-cluster endpoint"
+
+az_anno() { k get secret azurite-storage-credential -o go-template="{{index .metadata.annotations \"$1\"}}"; }
+[ "$(az_anno e2e/description)" = "blob store for e2e" ] \
+  || die azurite "commonAnnotation with spaces did not reach the Secret intact: '$(az_anno e2e/description)'"
+[ "$(az_anno argocd.argoproj.io/sync-options)" = "Prune=false" ] \
+  || die azurite "the Secret lost Prune=false"
+pass azurite "an annotation value with spaces reached the Secret intact, next to Prune=false"
+
+# The provisioning hook ran before `helm install --wait` returned.
+[ "$(k get job azurite-provisioning -o jsonpath='{.status.succeeded}')" = "1" ] \
+  || die azurite "provisioning Job did not succeed: $(k logs job/azurite-provisioning 2>&1 | tail -5)"
+az_prov=$(k logs job/azurite-provisioning 2>&1)
+for want in 'e2e-public: created, public access blob' 'e2e-private: created, public access none'; do
+  grep -q "$want" <<<"$az_prov" || die azurite "provisioning log lacks '$want': $az_prov"
+done
+pass azurite "provisioning hook created e2e-public (blob) and e2e-private (none)"
+
+# A stdlib-only client that signs requests with Shared Key itself, so the
+# phase needs no SDK install and no network beyond the cluster.
+cat >"$TMPDIR/azclient.py" <<'PY'
+import base64, hashlib, hmac, os, sys, time, urllib.error, urllib.parse, urllib.request
+from email.utils import formatdate
+
+# Everything comes out of the connection string the chart publishes, so a
+# wrong endpoint, account or key there fails the phase instead of passing.
+cs = dict(p.split("=", 1) for p in os.environ["AZURE_STORAGE_CONNECTION_STRING"].split(";") if p)
+account, key, endpoint = cs["AccountName"], base64.b64decode(cs["AccountKey"]), cs["BlobEndpoint"]
+container, blob, body = "e2e", "hello.txt", b"hello from e2e"
+
+def call(verb, path, query=None, data=b"", headers=None):
+    # Shared Key signing, as every Azure SDK does it. Path-style: the URL path
+    # already starts with /<account>, and the canonical resource prefixes it again.
+    query = query or {}
+    url = endpoint + path + ("?" + urllib.parse.urlencode(query) if query else "")
+    h = {"x-ms-date": formatdate(usegmt=True), "x-ms-version": "2021-08-06"}
+    h.update(headers or {})
+    xms = "".join("%s:%s\n" % (k, h[k]) for k in sorted(h) if k.startswith("x-ms-"))
+    resource = "/" + account + urllib.parse.urlparse(url).path
+    resource += "".join("\n%s:%s" % (k, query[k]) for k in sorted(query))
+    length = str(len(data)) if data else ""
+    sts = "\n".join([verb, "", "", length, "", h.get("Content-Type", ""), "", "", "", "", "", ""]) + "\n" + xms + resource
+    sig = base64.b64encode(hmac.new(key, sts.encode(), hashlib.sha256).digest()).decode()
+    h["Authorization"] = "SharedKey %s:%s" % (account, sig)
+    req = urllib.request.Request(url, data=data or None, method=verb, headers=h)
+    # Retry only connection-level failures (a Service endpoint catching up with
+    # a replacement pod); an HTTP status is an answer and is returned as-is.
+    deadline = time.monotonic() + 60
+    while True:
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read()
+        except (urllib.error.URLError, OSError) as e:
+            if time.monotonic() >= deadline:
+                raise AssertionError("%s unreachable after 60s: %r" % (url, e))
+            time.sleep(1)
+
+mode = sys.argv[1]
+if mode == "put":
+    code, _ = call("PUT", "/" + container, {"restype": "container"})
+    assert code in (201, 409), "create container returned %s" % code
+    code, _ = call("PUT", "/%s/%s" % (container, blob), data=body,
+                   headers={"x-ms-blob-type": "BlockBlob", "Content-Type": "text/plain"})
+    assert code == 201, "put blob returned %s" % code
+if mode in ("put", "get"):
+    code, got = call("GET", "/%s/%s" % (container, blob))
+    assert code == 200 and got == body, "get blob returned %s %r" % (code, got)
+    print("ok")
+elif mode == "denied":
+    code, _ = call("GET", "/%s/%s" % (container, blob))
+    assert code == 403, "expected 403 for this key, got %s" % code
+    print("denied")
+elif mode == "anon":
+    # Upload into each PROVISIONED container (no create call here, so a missing
+    # container fails the put), then read it back unsigned, the way a browser
+    # loads a plain media URL.
+    for c, want in (("e2e-public", 200), ("e2e-private", 403)):
+        code, _ = call("PUT", "/%s/%s" % (c, blob), data=body,
+                       headers={"x-ms-blob-type": "BlockBlob", "Content-Type": "text/plain"})
+        assert code == 201, "put into provisioned container %s returned %s" % (c, code)
+        try:
+            with urllib.request.urlopen("%s/%s/%s" % (endpoint, c, blob), timeout=10) as r:
+                got = r.status
+        except urllib.error.HTTPError as e:
+            got = e.code
+        assert got == want, "anonymous GET in %s returned %s, expected %s" % (c, got, want)
+    print("anon")
+PY
+k create configmap azclient --from-file=client.py="$TMPDIR/azclient.py" >/dev/null
+kubectl apply -n "$NS" -f - >/dev/null <<'YAML'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: azclient
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: c
+      image: python:3.13-alpine
+      command: [sleep, infinity]
+      # Bound exactly the way an app would bind it.
+      envFrom:
+        - secretRef: {name: azurite-storage-credential}
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities: {drop: [ALL]}
+      volumeMounts:
+        - {name: app, mountPath: /app}
+  volumes:
+    - name: app
+      configMap: {name: azclient}
+YAML
+k wait --for=condition=ready pod/azclient --timeout=180s >/dev/null \
+  || die azurite "client pod never became ready"
+
+# Run the client, optionally against a different connection string than the
+# one the pod was started with (to test a rotated or a foreign key).
+az_run() {
+  local mode=$1 cs=${2:-}
+  if [ -n "$cs" ]; then
+    k exec azclient -- env "AZURE_STORAGE_CONNECTION_STRING=$cs" python3 /app/client.py "$mode" 2>&1
+  else
+    k exec azclient -- python3 /app/client.py "$mode" 2>&1
+  fi
+}
+az_out=$(az_run put) || die azurite "client failed: $az_out"
+pass azurite "container create + blob put/get signed with the Secret's connection string"
+
+# Setting a custom account must disable the built-in devstoreaccount1 key —
+# it is printed in Microsoft's docs, so leaving it live would be an open door.
+# The key is split so GitHub push protection doesn't flag the published value.
+az_public_key="Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq"
+az_public_key+="/K1SZFPTOtr/KBHBeksoGMGw=="
+az_public="DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=$az_public_key;BlobEndpoint=$az_ep;"
+az_out=$(az_run denied "$az_public") || die azurite "the public emulator key was not rejected: $az_out"
+pass azurite "the well-known public emulator key is rejected with 403"
+
+az_out=$(az_run anon) || die azurite "provisioned containers misbehave: $az_out"
+pass azurite "anonymous read: 200 from the blob-public container, 403 from the private one"
+
+# Empty key + existing Secret → preserved across an upgrade.
+helm upgrade azurite-check "$CHART_DIR" -n "$NS" --reuse-values --wait --timeout 5m \
+  >"$TMPDIR/azurite-upgrade.log" 2>&1 || die azurite "helm upgrade failed: $(tail -5 "$TMPDIR/azurite-upgrade.log")"
+[ "$(az_secret AZURE_STORAGE_ACCOUNT_KEY)" = "$az_key" ] \
+  || die azurite "the generated key changed across a no-op upgrade"
+pass azurite "generated key preserved across helm upgrade"
+az_prov=$(k logs job/azurite-provisioning 2>&1)
+grep -q 'e2e-public: already exists, public access blob' <<<"$az_prov" \
+  || die azurite "provisioning was not a clean no-op on upgrade: $az_prov"
+pass azurite "provisioning re-ran on upgrade as a no-op (containers already exist)"
+
+# Blobs live on the PVC, so they must outlive the pod. Wait for the replacement
+# by name — see the mailpit phase for why rollout status alone races.
+az_old=$(k get pod -l app.kubernetes.io/name=azurite -o jsonpath='{.items[0].metadata.name}')
+k delete pod "$az_old" --wait >/dev/null
+k wait --for=delete "pod/$az_old" --timeout=120s >/dev/null 2>&1 || true
+k rollout status deployment azurite --timeout=180s >/dev/null \
+  || die azurite "azurite never came back after the pod delete"
+k wait --for=condition=ready pod -l app.kubernetes.io/name=azurite --timeout=180s >/dev/null \
+  || die azurite "the replacement pod never became ready"
+az_out=$(az_run get) || die azurite "blob lost across a pod delete: $az_out"
+pass azurite "blob on the PVC survived a pod delete"
+
+# Rotation through the value: the Job overwrites the Secret and the key
+# checksum rolls Azurite by itself. The old key must stop working, the new one
+# must work, and the data must still be there.
+az_old_cs=$(az_secret AZURE_STORAGE_CONNECTION_STRING)
+az_newkey=$(head -c 64 /dev/urandom | base64 | tr -d '\n')
+helm upgrade azurite-check "$CHART_DIR" -n "$NS" --reuse-values \
+  --set "azurite.account.key=$az_newkey" --wait --timeout 5m \
+  >"$TMPDIR/azurite-rotate.log" 2>&1 || die azurite "rotation upgrade failed: $(tail -5 "$TMPDIR/azurite-rotate.log")"
+[ "$(az_secret AZURE_STORAGE_ACCOUNT_KEY)" = "$az_newkey" ] \
+  || die azurite "the Secret does not hold the pinned key after rotation"
+k rollout status deployment azurite --timeout=180s >/dev/null \
+  || die azurite "azurite did not roll after the key changed"
+az_out=$(az_run get "$(az_secret AZURE_STORAGE_CONNECTION_STRING)") \
+  || die azurite "the rotated key does not work, or the blob is gone: $az_out"
+az_out=$(az_run denied "$az_old_cs") || die azurite "the old key still works after rotation: $az_out"
+pass azurite "rotating account.key rolls Azurite; new key works, old key is refused, data kept"
+
+k delete pod azclient --wait=false >/dev/null 2>&1 || true
+k delete configmap azclient >/dev/null 2>&1 || true
+helm uninstall azurite-check -n "$NS" >/dev/null 2>&1 || true
+# The Secret is created by the Job, not by Helm, so it outlives the release by
+# design (docs: "Teardown caveat").
+k get secret azurite-storage-credential >/dev/null 2>&1 \
+  || die azurite "the bootstrap-created Secret did not survive helm uninstall"
+k delete secret azurite-storage-credential >/dev/null 2>&1 || true
+pass azurite "credential Secret outlives helm uninstall, as documented"
 
 # ---------------------------------------------------------------------------
 # Phase 10 — temp_file_limit bounds query spill inside PGDATA

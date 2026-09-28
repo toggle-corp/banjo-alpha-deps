@@ -500,6 +500,194 @@ minioConfig:
   # bytes). Empty → omitted from the Middleware spec, so Traefik's 1 MiB default
   # applies. Only takes effect when maxRequestBodyBytes is set.
   memRequestBodyBytes: 52428800   # 50 MiB — held in memory before spilling to disk
+# Azurite (Azure Blob Storage emulator). One per instance: Microsoft's official
+# emulator, for apps written against Azure Blob Storage the way MinIO serves
+# apps written against S3. Blob service only (no queue/table). Rendered in-tree
+# from templates/azurite/ (there is no official subchart).
+azurite:
+  enabled: false
+
+  # Stable name → Blob DNS: `azurite.<namespace>.svc.cluster.local:10000`.
+  fullnameOverride: "azurite"
+
+  # Override the name of the consumer-facing credential Secret. Empty → computed
+  # default `<fullname>-storage-credential` (i.e. `azurite-storage-credential`).
+  # The bootstrap Job creates/manages a Secret by this name; Azurite and the app
+  # consume it by the same name.
+  secretName: ""
+
+  image:
+    repository: mcr.microsoft.com/azure-storage/azurite
+    tag: "3.37.0"   # pinned — verify a real existing tag before bumping
+    pullPolicy: IfNotPresent
+    pullSecrets: []
+
+  account:
+    # Storage account name: 3-24 lowercase letters and digits (the same rule
+    # real Azure and the SDKs enforce; rendering fails closed otherwise). It is
+    # the first path segment of every URL (`/<name>/<container>/<blob>`), and
+    # Azurite stores data per account — renaming it orphans existing blobs.
+    name: devstoreaccount1
+    # Bootstrapped by the pre-install/pre-upgrade Helm-hook Job
+    # (templates/azurite/secret-bootstrap-job.yaml) against the LIVE cluster —
+    # GitOps-safe, no `lookup`. Three-state logic at runtime:
+    #   - set here       → write/overwrite the Secret with this key (rotation)
+    #   - empty + exists → preserve the existing Secret (no-op)
+    #   - empty + absent → generate a random 64-byte base64 key once
+    # Must be base64 (clients decode it to sign requests). Azurite reads it on
+    # start, so it is rotatable: set a new value and the Azurite pod rolls
+    # itself; restart the consuming app pods. Setting a custom account also
+    # disables Azurite's built-in `devstoreaccount1` key, which is public.
+    key: ""
+
+  service:
+    type: ClusterIP
+    blobPort: 10000
+
+  # Blob API ingress. Off by default: in-cluster apps reach Azurite on the
+  # Service. Turn it on when a browser has to reach blobs directly (SAS upload
+  # or download URLs) — the endpoint in the Secret then switches to the ingress
+  # host, so the SAS URLs the app mints are browser-reachable.
+  ingress:
+    enabled: false
+    ingressClassName: "traefik"
+    # REQUIRED when enabled — rendering fails closed if left empty. The whole
+    # host is routed to Azurite (path `/`, not configurable): Azurite reads the
+    # account from the first path segment, so it cannot sit under a sub-path.
+    hostname: ""
+    # Add Traefik middlewares, cert-manager annotations, etc. here. No
+    # health-check annotation is chart-fixed: Azurite has no unauthenticated
+    # endpoint that returns 200 (anonymous requests get 400/403).
+    annotations: {}
+    # Passed through verbatim to `spec.tls`.
+    tls: []
+
+  # Scheme used when deriving the endpoint from `ingress.hostname`.
+  endpointScheme: https
+  # Explicit AZURE_STORAGE_BLOB_ENDPOINT override, used verbatim — it must
+  # include the account path, e.g. `https://blob.example.com/devstoreaccount1`.
+  # Empty → derived: `<endpointScheme>://<ingress.hostname>/<account>` with the
+  # ingress on, else `http://<fullname>.<namespace>.svc.cluster.local:<port>/<account>`.
+  endpointUrl: ""
+
+  # Accept any x-ms-version header. On by default: Azure SDKs bump the API
+  # version they send faster than Azurite releases, and a pinned emulator then
+  # rejects every request from a newer SDK ("The API version ... is not
+  # supported by Azurite"). Set false to test against the strict version.
+  skipApiVersionCheck: true
+  # Ignore unsupported headers and query parameters instead of failing the
+  # request (`--loose`).
+  loose: false
+  # Azurite sends usage telemetry to Microsoft unless told not to. Off here.
+  telemetry: false
+  # Extra CLI flags appended verbatim, e.g. ["--silent"] or ["--oauth", "basic"].
+  extraArgs: []
+
+  # Containers to create on install and upgrade — the Azurite counterpart of
+  # MinIO's `defaultBuckets` + provisioning. Each entry is a bare name (private)
+  # or {name, publicAccess}:
+  #   none       private: every request must be signed (the default)
+  #   blob       anyone with a blob's URL can read it; listing stays private
+  #   container  anyone can read blobs AND list the container
+  # Apps that hand out unsigned media URLs (django-storages without
+  # AZURE_URL_EXPIRATION_SECS) need `blob`, or browsers get 403. A
+  # post-install/post-upgrade hook Job creates missing containers and applies
+  # publicAccess on every run, keeping any stored access policies. It never
+  # deletes: an entry removed from this list leaves its container in place.
+  # Empty → no Job.
+  #   defaultContainers:
+  #     - name: api
+  #       publicAccess: blob
+  #     - backups
+  defaultContainers: []
+
+  provisioning:
+    # Helm runs post-install hooks without waiting for the Deployment, and a
+    # first install may still be pulling the image, so the Job polls for
+    # Azurite itself for up to this long.
+    waitTimeoutSeconds: 300
+    # The wait loop absorbs a slow start; retries only cover a transient error.
+    backoffLimit: 3
+    # Bounds the Job across ALL attempts, so it must exceed waitTimeoutSeconds.
+    activeDeadlineSeconds: 600
+    resources:
+      requests:
+        cpu: 10m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 128Mi
+
+  # Blob storage. Enabled → metadata and blob data live on the PVC and survive
+  # restarts. Disabled → a size-bounded emptyDir (`size` below becomes its
+  # sizeLimit), so blobs are lost with the pod.
+  persistence:
+    enabled: true
+    storageClass: "local-path"
+    size: 1Gi  # NOTE: ignored by local-path (node disk is the real limit)
+    accessModes:
+      - ReadWriteOnce
+
+  # Azurite keeps all blob *metadata* in memory (LokiJS) — blob contents are
+  # streamed to disk — so memory grows with the number of blobs, not their size.
+  resources:
+    requests:
+      cpu: 10m
+      memory: 128Mi
+    limits:
+      cpu: 1
+      memory: 512Mi
+
+  # The image declares no USER, so it would otherwise run as root. uid 1000 is
+  # the image's own `node` user; Azurite needs no privileges (it binds 10000).
+  podSecurityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    # Only re-own the volume when its root is wrong, instead of chown-ing every
+    # blob extent on every start (storage classes that apply fsGroup at all —
+    # local-path does not).
+    fsGroupChangePolicy: OnRootMismatch
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+
+  # Satisfies the restricted Pod Security Standard. `readOnlyRootFilesystem` is
+  # safe: Azurite writes only to its `--location` (the mounted data volume).
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+
+  # Deployment-metadata standard (app.togglecorp.com/*): the deploy layer stamps
+  # part-of/name/stack/tier/instance here; `component: resources` is OURS.
+  # Applied to every azurite resource. Selector-safe — the Deployment's
+  # matchLabels reads only app.kubernetes.io/{name,instance}.
+  commonLabels:
+    app.togglecorp.com/component: resources
+
+  # Steer alpha object stores off RAID nodes — RAID is reserved for prod.
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: "node.kubernetes.io/disk-raid"
+            operator: NotIn
+            values:
+              - "true"
+
+  tolerations: []
+
+  nodeSelector: {}
+
+  # Annotations applied to every azurite resource's metadata (and propagated
+  # onto the bootstrap-created Secret). On the ingress they are merged with
+  # `ingress.annotations`, which wins on a conflict. Not applied to the hook Job.
+  commonAnnotations: {}
+
 # Mailpit (SMTP catcher). One per instance: the app points its SMTP client at
 # `mailpit.<namespace>.svc.cluster.local:1025` and every message it sends is
 # swallowed and shown in Mailpit's web UI instead of reaching a real inbox.
@@ -681,9 +869,9 @@ mailpit:
 
 # Shared config for the credential-bootstrap Helm-hook Jobs. A pre-install /
 # pre-upgrade Job runs `kubectl` against the live cluster to create/manage the
-# tcpg-pg-credential and minio-s3-credential Secrets (one GitOps-safe mechanism
-# for plain Helm, Flux-HelmRelease, and ArgoCD — no `lookup`, no
-# ignoreDifferences). The chart auto-creates the RBAC (ServiceAccount + Role +
+# tcpg-pg-credential, minio-s3-credential and azurite-storage-credential
+# Secrets (one GitOps-safe mechanism for plain Helm, Flux-HelmRelease, and
+# ArgoCD — no `lookup`, no ignoreDifferences). The chart auto-creates the RBAC (ServiceAccount + Role +
 # RoleBinding) the Jobs need.
 secretBootstrap:
   image:
