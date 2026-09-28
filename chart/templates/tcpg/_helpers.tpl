@@ -38,7 +38,7 @@ contains "tcpg", it's used as-is.
 
 {{/*
 ServiceAccount name for the shared secret-bootstrap hook (Jobs + RBAC). Neutral
-name — bootstraps both the tcpg and minio credential Secrets.
+name — bootstraps the tcpg, minio and azurite credential Secrets.
 */}}
 {{- define "tcpg.secretBootstrap.serviceAccountName" -}}
 {{- printf "%s-secret-bootstrap" .Release.Name | trunc 63 | trimSuffix "-" -}}

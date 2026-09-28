@@ -1,0 +1,145 @@
+{{- if .Values.azurite.enabled }}
+{{- $containers := include "azurite.defaultContainers" . | trim }}
+{{- if $containers }}
+{{- $p := .Values.azurite.provisioning }}
+{{- if le (int $p.activeDeadlineSeconds) (int $p.waitTimeoutSeconds) }}
+{{- fail (printf "azurite.provisioning.activeDeadlineSeconds (%v) must exceed waitTimeoutSeconds (%v) — the deadline bounds the whole Job, so Kubernetes would kill it mid-wait with no useful log" $p.activeDeadlineSeconds $p.waitTimeoutSeconds) }}
+{{- end }}
+{{- /*
+Creates azurite.defaultContainers — the Azurite counterpart of MinIO's
+`defaultBuckets` + provisioning. Creating a container needs a *running*
+Azurite, so unlike the credential bootstrap this is a post-install/post-upgrade
+hook (ArgoCD converts it to PostSync). Helm does not wait for the Deployment to
+be Ready before post-install hooks, so the script polls for Azurite itself.
+
+It runs on the Azurite image (Node.js is already in it, at the same pinned
+version) and talks to the in-cluster Service, never the ingress, so it works
+before DNS/TLS for a public host exist. Only the account key is read at
+runtime, from the Secret the pre-install hook bootstrapped. Containers are
+never deleted: dropping one from the list leaves it, and its blobs, in place.
+*/ -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-provisioning" (include "azurite.fullname" .) | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "azurite.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation
+    # ArgoCD ignores helm.sh/hook-weight; it orders PostSync by sync-wave.
+    "argocd.argoproj.io/sync-wave": "0"
+spec:
+  backoffLimit: {{ .Values.azurite.provisioning.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.azurite.provisioning.activeDeadlineSeconds }}
+  template:
+    metadata:
+      # NOT azurite.selectorLabels — see secret-bootstrap-job.yaml.
+      labels:
+        app.kubernetes.io/name: {{ printf "%s-provisioning" (include "azurite.name" .) | trunc 63 | trimSuffix "-" }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      {{- with .Values.azurite.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      restartPolicy: OnFailure
+      # Talks to Azurite only, never the Kubernetes API.
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.azurite.podSecurityContext | nindent 8 }}
+      containers:
+        - name: provisioning
+          image: "{{ .Values.azurite.image.repository }}:{{ .Values.azurite.image.tag }}"
+          imagePullPolicy: {{ .Values.azurite.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.azurite.containerSecurityContext | nindent 12 }}
+          resources: {{- toYaml .Values.azurite.provisioning.resources | nindent 12 }}
+          env:
+            - name: AZ_ENDPOINT
+              value: {{ include "azurite.internalBlobEndpoint" . | quote }}
+            - name: AZ_ACCOUNT
+              value: {{ include "azurite.accountName" . | quote }}
+            - name: AZ_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "azurite.secretName" . }}
+                  key: AZURE_STORAGE_ACCOUNT_KEY
+            # One `name=access` per line, validated by azurite.defaultContainers.
+            - name: CONTAINERS
+              value: {{ $containers | quote }}
+            - name: WAIT_TIMEOUT_SECONDS
+              value: {{ .Values.azurite.provisioning.waitTimeoutSeconds | quote }}
+          command:
+            - node
+            - -e
+            - |
+              // Create azurite.defaultContainers and apply their public access. Idempotent:
+              // an existing container counts as success, and public access is only rewritten
+              // when it differs — with the stored access policies read back first and sent
+              // again, because a Set Container ACL replaces them wholesale.
+              const http = require('http'), https = require('https'), crypto = require('crypto');
+              const { AZ_ENDPOINT, AZ_ACCOUNT, AZ_KEY, CONTAINERS } = process.env;
+              const deadline = Date.now() + Number(process.env.WAIT_TIMEOUT_SECONDS || 300) * 1000;
+              const key = Buffer.from(AZ_KEY, 'base64');
+              const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+              // One Shared Key–signed request, as every Azure SDK signs it. Path-style: the
+              // endpoint's path already starts with /<account>.
+              function send(method, path, query, headers, body) {
+                const url = new URL(AZ_ENDPOINT.replace(/\/$/, '') + path);
+                for (const [k, v] of Object.entries(query)) url.searchParams.set(k, v);
+                const data = Buffer.from(body || '');
+                const h = { 'x-ms-date': new Date().toUTCString(), 'x-ms-version': '2021-08-06', ...headers };
+                if (data.length) h['Content-Type'] = 'application/xml';
+                const xms = Object.keys(h).filter(k => k.startsWith('x-ms-')).sort().map(k => `${k}:${h[k]}\n`).join('');
+                const resource = `/${AZ_ACCOUNT}${url.pathname}` + Object.keys(query).sort().map(k => `\n${k}:${query[k]}`).join('');
+                const sts = [method, '', '', data.length ? String(data.length) : '', '', h['Content-Type'] || '', '', '', '', '', '', ''].join('\n') + '\n' + xms + resource;
+                h.Authorization = `SharedKey ${AZ_ACCOUNT}:` + crypto.createHmac('sha256', key).update(sts, 'utf8').digest('base64');
+                h['Content-Length'] = String(data.length);
+                const lib = url.protocol === 'https:' ? https : http;
+                return new Promise((resolve, reject) => {
+                  const req = lib.request(url, { method, headers: h, timeout: 10000 }, res => {
+                    let b = '';
+                    res.on('data', d => { b += d; });
+                    res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: b, code: (b.match(/<Code>(.*?)<\/Code>/) || [])[1] || '' }));
+                  });
+                  req.on('timeout', () => req.destroy(new Error('timeout')));
+                  req.on('error', reject);
+                  req.end(data);
+                });
+              }
+
+              // Retry until Azurite answers: Helm runs post-install hooks without waiting for
+              // the Deployment, and a 403 can mean the pod is still rolling onto a rotated key.
+              // Any other unexpected answer fails at once.
+              async function call(method, path, query, headers, body, ok) {
+                for (;;) {
+                  let r, why;
+                  try { r = await send(method, path, query, headers, body); } catch (e) { why = e.code || e.message; }
+                  if (r && ok(r)) return r;
+                  if (r && r.status !== 403) throw new Error(`${method} ${path}: HTTP ${r.status} ${r.code}`);
+                  const reason = r ? `HTTP 403 ${r.code}` : why;
+                  if (Date.now() > deadline) throw new Error(`${method} ${path}: gave up waiting for Azurite (${reason})`);
+                  console.log(`waiting for Azurite (${reason})`);
+                  await sleep(3000);
+                }
+              }
+
+              (async () => {
+                for (const line of CONTAINERS.split('\n').filter(Boolean)) {
+                  const [name, access] = line.split('=');
+                  const created = await call('PUT', `/${name}`, { restype: 'container' }, {}, '',
+                    r => r.status === 201 || (r.status === 409 && r.code === 'ContainerAlreadyExists'));
+                  const acl = await call('GET', `/${name}`, { restype: 'container', comp: 'acl' }, {}, '', r => r.status === 200);
+                  const current = acl.headers['x-ms-blob-public-access'] || 'none';
+                  if (current !== access) {
+                    await call('PUT', `/${name}`, { restype: 'container', comp: 'acl' },
+                      access === 'none' ? {} : { 'x-ms-blob-public-access': access }, acl.body, r => r.status === 200);
+                  }
+                  console.log(`${name}: ${created.status === 201 ? 'created' : 'already exists'}, public access ${access}${current !== access ? ` (was ${current})` : ''}`);
+                }
+              })().catch(e => { console.error(`error: ${e.message}`); process.exit(1); });
+{{- end }}
+{{- end }}

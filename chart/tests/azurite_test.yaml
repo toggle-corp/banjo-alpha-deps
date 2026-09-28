@@ -1,0 +1,400 @@
+suite: azurite
+# Per-instance Azure Blob Storage emulator: Deployment + Service + data PVC (or a
+# bounded emptyDir) + optional ingress. The credential Secret it reads its account
+# key from is created by the bootstrap Job — see azurite_secret_test.yaml.
+templates:
+  - templates/azurite/deployment.yaml
+  - templates/azurite/service.yaml
+  - templates/azurite/pvc.yaml
+  - templates/azurite/ingress.yaml
+release:
+  name: my-release
+  namespace: alpha-3
+tests:
+  - it: renders nothing at all by default (opt-in)
+    asserts:
+      - hasDocuments: { count: 0 }
+
+  - it: renders the Deployment, Service and PVC when enabled, but no ingress
+    set:
+      azurite.enabled: true
+    asserts:
+      - hasDocuments: { count: 1 }
+        template: templates/azurite/deployment.yaml
+      - hasDocuments: { count: 1 }
+        template: templates/azurite/service.yaml
+      - hasDocuments: { count: 1 }
+        template: templates/azurite/pvc.yaml
+      - hasDocuments: { count: 0 }
+        template: templates/azurite/ingress.yaml
+
+  - it: uses the fixed name azurite, not <release>-azurite
+    set:
+      azurite.enabled: true
+    asserts:
+      - equal: { path: metadata.name, value: azurite }
+        template: templates/azurite/deployment.yaml
+      - equal: { path: metadata.name, value: azurite }
+        template: templates/azurite/service.yaml
+      - equal: { path: metadata.name, value: azurite-data }
+        template: templates/azurite/pvc.yaml
+
+  - it: falls back to <release>-azurite when the fullnameOverride is cleared
+    set:
+      azurite.enabled: true
+      azurite.fullnameOverride: ""
+    asserts:
+      - equal: { path: metadata.name, value: my-release-azurite }
+        template: templates/azurite/service.yaml
+
+  # --- Service -------------------------------------------------------------
+
+  - it: exposes the blob port on a ClusterIP Service
+    set:
+      azurite.enabled: true
+    asserts:
+      - equal: { path: spec.type, value: ClusterIP }
+        template: templates/azurite/service.yaml
+      - contains:
+          path: spec.ports
+          content: { port: 10000, targetPort: blob, protocol: TCP, name: blob }
+        template: templates/azurite/service.yaml
+
+  - it: remaps the Service port without touching the container port
+    set:
+      azurite.enabled: true
+      azurite.service.blobPort: 80
+    asserts:
+      - equal:
+          path: spec.ports[0].port
+          value: 80
+        template: templates/azurite/service.yaml
+      - equal:
+          path: spec.template.spec.containers[0].ports[0].containerPort
+          value: 10000
+        template: templates/azurite/deployment.yaml
+
+  # --- Container -----------------------------------------------------------
+
+  - it: runs the blob-only binary, path-style, without telemetry
+    set:
+      azurite.enabled: true
+    template: templates/azurite/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: mcr.microsoft.com/azure-storage/azurite:3.37.0
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value: [azurite-blob]
+      - equal:
+          path: spec.template.spec.containers[0].args
+          value:
+            - --blobHost
+            - 0.0.0.0
+            - --blobPort
+            - "10000"
+            - --location
+            - /data
+            - --disableProductStyleUrl
+            - --disableTelemetry
+            - --skipApiVersionCheck
+
+  - it: toggles the API-version check, loose mode and telemetry, and appends extraArgs
+    set:
+      azurite.enabled: true
+      azurite.skipApiVersionCheck: false
+      azurite.loose: true
+      azurite.telemetry: true
+      azurite.extraArgs: ["--silent"]
+    template: templates/azurite/deployment.yaml
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --skipApiVersionCheck
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --disableTelemetry
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --loose
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --silent
+
+  - it: builds AZURITE_ACCOUNTS from the bootstrap-managed key
+    # Replacing the account list is also what disables the public
+    # devstoreaccount1 key, so the generated one is the only one that works.
+    set:
+      azurite.enabled: true
+    template: templates/azurite/deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: AZURITE_ACCOUNT_KEY
+            valueFrom:
+              secretKeyRef:
+                name: azurite-storage-credential
+                key: AZURE_STORAGE_ACCOUNT_KEY
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: AZURITE_ACCOUNTS
+            value: "devstoreaccount1:$(AZURITE_ACCOUNT_KEY)"
+
+  - it: follows account.name and secretName overrides
+    set:
+      azurite.enabled: true
+      azurite.account.name: myapp01
+      azurite.secretName: my-blob-secret
+    template: templates/azurite/deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: AZURITE_ACCOUNTS
+            value: "myapp01:$(AZURITE_ACCOUNT_KEY)"
+      - equal:
+          path: spec.template.spec.containers[0].env[0].valueFrom.secretKeyRef.name
+          value: my-blob-secret
+
+  - it: fails closed on an invalid storage account name
+    set:
+      azurite.enabled: true
+      azurite.account.name: My_Account
+    template: templates/azurite/deployment.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: 'azurite.account.name "My_Account" is not a valid storage account name — use 3-24 lowercase letters and digits'
+
+  - it: probes the blob port over TCP (no unauthenticated HTTP health endpoint)
+    set:
+      azurite.enabled: true
+    template: templates/azurite/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.tcpSocket.port
+          value: blob
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.tcpSocket.port
+          value: blob
+
+  - it: carries no checksum annotation while the key is generated
+    set:
+      azurite.enabled: true
+    template: templates/azurite/deployment.yaml
+    asserts:
+      - notExists:
+          path: spec.template.metadata.annotations
+
+  - it: stamps a checksum of a pinned key onto the pod template
+    set:
+      azurite.enabled: true
+      azurite.account.key: "c2VjcmV0LWtleS1mb3ItdGVzdHM="
+    template: templates/azurite/deployment.yaml
+    asserts:
+      - matchRegex:
+          path: spec.template.metadata.annotations["checksum/account-key"]
+          pattern: "^[0-9a-f]{64}$"
+
+  # --- Security / scheduling -----------------------------------------------
+
+  - it: runs non-root under the restricted PSS with a read-only root filesystem
+    set:
+      azurite.enabled: true
+    template: templates/azurite/deployment.yaml
+    asserts:
+      - equal: { path: spec.template.spec.securityContext.runAsUser, value: 1000 }
+      - equal: { path: spec.template.spec.securityContext.runAsNonRoot, value: true }
+      - equal:
+          path: spec.template.spec.securityContext.fsGroupChangePolicy
+          value: OnRootMismatch
+      - equal:
+          path: spec.template.spec.automountServiceAccountToken
+          value: false
+      - equal:
+          path: spec.template.spec.securityContext.seccompProfile.type
+          value: RuntimeDefault
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          value: [ALL]
+
+  - it: uses Recreate so two pods never share the RWO data volume
+    set:
+      azurite.enabled: true
+    template: templates/azurite/deployment.yaml
+    asserts:
+      - equal: { path: spec.strategy.type, value: Recreate }
+      - equal: { path: spec.replicas, value: 1 }
+
+  - it: avoids RAID nodes by default
+    set:
+      azurite.enabled: true
+    template: templates/azurite/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].key
+          value: node.kubernetes.io/disk-raid
+
+  # --- Storage -------------------------------------------------------------
+
+  - it: mounts the PVC at the data location by default
+    set:
+      azurite.enabled: true
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[0]
+          value: { name: data, persistentVolumeClaim: { claimName: azurite-data } }
+        template: templates/azurite/deployment.yaml
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[0]
+          value: { name: data, mountPath: /data }
+        template: templates/azurite/deployment.yaml
+      - equal: { path: spec.storageClassName, value: local-path }
+        template: templates/azurite/pvc.yaml
+      - equal: { path: spec.resources.requests.storage, value: 1Gi }
+        template: templates/azurite/pvc.yaml
+
+  - it: falls back to a size-bounded emptyDir with persistence off
+    set:
+      azurite.enabled: true
+      azurite.persistence.enabled: false
+      azurite.persistence.size: 2Gi
+    asserts:
+      - hasDocuments: { count: 0 }
+        template: templates/azurite/pvc.yaml
+      - equal:
+          path: spec.template.spec.volumes[0]
+          value: { name: data, emptyDir: { sizeLimit: 2Gi } }
+        template: templates/azurite/deployment.yaml
+
+  # --- Ingress -------------------------------------------------------------
+
+  - it: renders the ingress onto the blob port when enabled
+    set:
+      azurite.enabled: true
+      azurite.ingress.enabled: true
+      azurite.ingress.hostname: blob.alpha-3.example.com
+    template: templates/azurite/ingress.yaml
+    asserts:
+      - equal: { path: spec.ingressClassName, value: traefik }
+      # Always the whole host: Azurite reads the account from the first path
+      # segment, so a sub-path can never work.
+      - equal:
+          path: spec.rules[0].http.paths[0].path
+          value: /
+      - equal:
+          path: spec.rules[0].http.paths[0].pathType
+          value: Prefix
+      - equal:
+          path: spec.rules[0].host
+          value: blob.alpha-3.example.com
+      - equal:
+          path: spec.rules[0].http.paths[0].backend.service
+          value: { name: azurite, port: { number: 10000 } }
+      - notExists: { path: metadata.annotations }
+
+  - it: fails closed when the ingress is enabled without a hostname
+    set:
+      azurite.enabled: true
+      azurite.ingress.enabled: true
+    template: templates/azurite/ingress.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: azurite.ingress.hostname is required when azurite.ingress.enabled is true
+
+  - it: merges ingress annotations over commonAnnotations and passes tls through
+    set:
+      azurite.enabled: true
+      azurite.ingress.enabled: true
+      azurite.ingress.hostname: blob.example.com
+      azurite.ingress.annotations:
+        cert-manager.io/cluster-issuer: letsencrypt
+        team: ingress-wins
+      azurite.ingress.tls:
+        - hosts: [blob.example.com]
+          secretName: blob-tls
+      azurite.commonAnnotations:
+        team: common
+        owner: platform
+    template: templates/azurite/ingress.yaml
+    asserts:
+      - equal:
+          path: metadata.annotations
+          value:
+            cert-manager.io/cluster-issuer: letsencrypt
+            team: ingress-wins
+            owner: platform
+      - equal:
+          path: spec.tls
+          value: [{ hosts: [blob.example.com], secretName: blob-tls }]
+
+  # --- Labels / annotations ------------------------------------------------
+
+  - it: labels every resource component=resources and merges the deploy layer's taxonomy
+    set:
+      azurite.enabled: true
+      azurite.persistence.enabled: true
+      azurite.ingress.enabled: true
+      azurite.ingress.hostname: blob.example.com
+      azurite.commonLabels:
+        app.togglecorp.com/part-of: IFRC
+        app.togglecorp.com/instance: 11
+    asserts:
+      - equal:
+          path: metadata.labels["app.togglecorp.com/component"]
+          value: resources
+      - equal:
+          path: metadata.labels["app.togglecorp.com/part-of"]
+          value: IFRC
+      # A numeric instance id must render as a string, or the API rejects it.
+      - equal:
+          path: metadata.labels["app.togglecorp.com/instance"]
+          value: "11"
+      - equal:
+          path: metadata.labels["app.kubernetes.io/component"]
+          value: object-store
+
+  - it: keeps commonLabels out of the immutable selector
+    set:
+      azurite.enabled: true
+      azurite.commonLabels:
+        app.togglecorp.com/part-of: IFRC
+    template: templates/azurite/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.selector.matchLabels
+          value:
+            app.kubernetes.io/name: azurite
+            app.kubernetes.io/instance: my-release
+      - equal:
+          path: spec.template.metadata.labels["app.togglecorp.com/part-of"]
+          value: IFRC
+      - notExists:
+          path: spec.template.metadata.labels["helm.sh/chart"]
+
+  - it: applies commonAnnotations to every resource's metadata
+    set:
+      azurite.enabled: true
+      azurite.commonAnnotations:
+        argocd.argoproj.io/sync-wave: "-1"
+    asserts:
+      - equal:
+          path: 'metadata.annotations["argocd.argoproj.io/sync-wave"]'
+          value: "-1"
+        template: templates/azurite/deployment.yaml
+      - equal:
+          path: 'metadata.annotations["argocd.argoproj.io/sync-wave"]'
+          value: "-1"
+        template: templates/azurite/service.yaml
+      - equal:
+          path: 'metadata.annotations["argocd.argoproj.io/sync-wave"]'
+          value: "-1"
+        template: templates/azurite/pvc.yaml
