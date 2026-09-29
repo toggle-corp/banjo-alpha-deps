@@ -1,6 +1,6 @@
 # Using the chart
 
-Umbrella chart of alpha-environment dependencies for the tc cluster: Postgres (`tcpg`), MinIO, Dragonfly, and Mailpit. Every component is opt-in (`enabled: false` by default). `tcpg` is a single-replica Postgres with an optional one-shot restore from a URL on first boot.
+Umbrella chart of alpha-environment dependencies for the tc cluster: Postgres (`tcpg`), MinIO, Azurite, Dragonfly, and Mailpit. Every component is opt-in (`enabled: false` by default). `tcpg` is a single-replica Postgres with an optional one-shot restore from a URL on first boot.
 
 Chart source: <https://github.com/toggle-corp/banjo-alpha-deps>.
 
@@ -73,6 +73,19 @@ minioConfig:
   secretAccessKey: ""          # optional — set to pin/rotate
   endpointUrl: ""             # optional — set instead of minio.ingress.hostname for in-cluster endpoints
 
+# === Azurite (Azure Blob Storage emulator) ===================================
+azurite:
+  enabled: false               # flip to true to deploy a per-instance Blob emulator
+  account:
+    # Bootstrapped into the azurite-storage-credential Secret by a pre-install/
+    # pre-upgrade Helm-hook Job (same model as MinIO). Empty → generated once and
+    # preserved; set → written/overwritten (rotation). Must be base64.
+    key: ""                    # optional — set to pin/rotate
+  ingress:
+    enabled: false             # only needed for browser-reachable SAS URLs
+    hostname: ""               # REQUIRED when the ingress is enabled
+  defaultContainers: []        # optional, e.g. [{name: api, publicAccess: blob}]
+
 # === Mailpit (SMTP catcher) ==================================================
 mailpit:
   enabled: false               # flip to true to deploy a per-instance mail catcher
@@ -90,6 +103,7 @@ dragonfly:
 
 - `tcpg-pg-credential` — Postgres connection (`POSTGRES_HOST/PORT/DB/USER/PASSWORD/URI`).
 - `minio-s3-credential` — S3 access (`S3_ENDPOINT_URL/REGION/ACCESS_KEY_ID/SECRET_ACCESS_KEY`).
+- `azurite-storage-credential` — Azure Blob access (`AZURE_STORAGE_ACCOUNT_NAME/ACCOUNT_KEY/BLOB_ENDPOINT/CONNECTION_STRING`).
 - `mailpit-smtp-config` — SMTP settings (`SMTP_HOST/PORT/USER/PASSWORD/USE_TLS/URL`).
 
 ## Alpha environment (tc cluster)
@@ -133,8 +147,10 @@ Responsibilities are split, and Helm deep-merges the two halves:
 | `health-check: /minio/health/live` (MinIO), `health-check: /livez` (Mailpit) | **this chart** — the path is a property of the component, not of the install |
 
 A parent Helm chart cannot push values into a subchart, so the deploy layer writes the
-subchart paths directly. Mailpit is in-tree and takes the same `commonLabels` key
-(`mailpit.commonLabels`), which lands on every Mailpit resource, not just the ingress.
+subchart paths directly. Mailpit and Azurite are in-tree and take the same `commonLabels`
+key (`mailpit.commonLabels`, `azurite.commonLabels`), which lands on every resource of
+that component, not just the ingress. Azurite gets no chart-fixed `health-check`: it has
+no unauthenticated endpoint that returns `200`.
 If you install this chart by hand and want the taxonomy, supply:
 
 ```yaml
@@ -209,7 +225,7 @@ This block is **first-init only**: the credentials seed the DB the first time it
 
 #### Credential bootstrap: how the Secrets are created
 
-The `tcpg-pg-credential` (and the MinIO `minio-s3-credential`) Secrets are **not** rendered by the chart templates. Instead a **pre-install / pre-upgrade Helm-hook `Job`** runs `kubectl` against the **live cluster** to create or update each Secret. This is one mechanism that behaves identically under plain `helm`, Flux `HelmRelease`, and ArgoCD — there is **no `lookup`** (which is blind under `helm template` / GitOps) and **no `ignoreDifferences` hatch** to configure.
+The `tcpg-pg-credential` (and the MinIO `minio-s3-credential` and Azurite `azurite-storage-credential`) Secrets are **not** rendered by the chart templates. Instead a **pre-install / pre-upgrade Helm-hook `Job`** runs `kubectl` against the **live cluster** to create or update each Secret. This is one mechanism that behaves identically under plain `helm`, Flux `HelmRelease`, and ArgoCD — there is **no `lookup`** (which is blind under `helm template` / GitOps) and **no `ignoreDifferences` hatch** to configure.
 
 How it works:
 
@@ -581,11 +597,12 @@ kubectl -n <namespace> get secret tcpg-pg-credential \
 
 ## Subcharts
 
-`banjo-alpha-deps` is an umbrella. tcpg and mailpit are DIY components rendered from `templates/`. MinIO and Dragonfly come in via Helm dependencies.
+`banjo-alpha-deps` is an umbrella. tcpg, azurite and mailpit are DIY components rendered from `templates/`. MinIO and Dragonfly come in via Helm dependencies.
 
 | Component  | Source                                                  | Gate                 |
 |------------|---------------------------------------------------------|----------------------|
 | tcpg       | DIY (this chart, `templates/tcpg/`)                     | `tcpg.enabled`       |
+| azurite    | DIY (this chart, `templates/azurite/`)                  | `azurite.enabled`    |
 | mailpit    | DIY (this chart, `templates/mailpit/`)                  | `mailpit.enabled`    |
 | dragonfly  | `oci://ghcr.io/dragonflydb/dragonfly/helm`, pinned in `Chart.yaml` | `dragonfly.enabled` |
 | minio      | `oci://registry-1.docker.io/bitnamicharts/minio`, pinned in `Chart.yaml` | `minio.enabled`     |
@@ -704,6 +721,237 @@ The baked-in `chart/values.yaml` defaults already wire all of this with a 100 Mi
 `chart/values.yaml` works around this by overriding all four image repositories the chart can pull (`image`, `clientImage`, `console.image`, `defaultInitContainers.volumePermissions.image`) to their `bitnamilegacy/*` equivalents — a frozen free mirror of the pre-cutover images. Tags are inherited from the chart's own pinned defaults; the same tags exist on bitnamilegacy, so versions stay in lockstep with whatever Chart.yaml's pinned `version:` was published with.
 
 Trade-off: `bitnamilegacy/*` is frozen — no future security patches. Acceptable for alpha; **not** for production. For prod, either restore `image.repository: bitnami/<name>` (and the other three) and supply pull secrets for a Bitnami Secure Images subscription, or migrate off the Bitnami chart entirely (e.g. `minio/operator`).
+
+### Enabling Azurite
+
+A per-instance **Azure Blob Storage** emulator. It runs [Azurite](https://github.com/Azure/Azurite),
+Microsoft's official emulator, so an app written against Azure Blob Storage gets a
+working blob store in alpha, the same way MinIO serves apps written against S3.
+Blob service only (no queue/table).
+
+Rendered in-tree from `templates/azurite/`: a Deployment, a Service, a data PVC, an
+optional ingress, a credential-bootstrap Job, and an optional container-provisioning Job.
+There is no official subchart.
+
+```yaml
+azurite:
+  enabled: true
+```
+
+That is the whole minimum. Blob DNS: `azurite.<namespace>.svc.cluster.local:10000`.
+URLs are always **path-style**: `http://azurite.<namespace>.svc.cluster.local:10000/<account>/<container>/<blob>`.
+
+#### Generated storage credentials
+
+A **pre-install/pre-upgrade Helm-hook Job** (`templates/azurite/secret-bootstrap-job.yaml`)
+creates a Secret named **`azurite-storage-credential`** against the live cluster. It is the
+same mechanism as MinIO and Postgres (see
+[Credential bootstrap: how the Secrets are created](#credential-bootstrap-how-the-secrets-are-created)):
+no `lookup`, no `ignoreDifferences`, and the same behaviour under plain Helm, Flux and ArgoCD.
+Azurite reads its account key from this Secret, and the app binds it with `envFrom`:
+
+```yaml
+envFrom:
+  - secretRef:
+      name: azurite-storage-credential
+```
+
+| Key | Value |
+| --- | --- |
+| `AZURE_STORAGE_ACCOUNT_NAME` | `azurite.account.name` (default `devstoreaccount1`) |
+| `AZURE_STORAGE_ACCOUNT_KEY` | Account key. Empty `azurite.account.key` → a random 64-byte base64 key, generated once and preserved; set it to pin/rotate. |
+| `AZURE_STORAGE_BLOB_ENDPOINT` | Blob endpoint, ending in `/<account>` (see below) |
+| `AZURE_STORAGE_CONNECTION_STRING` | `DefaultEndpointsProtocol=…;AccountName=…;AccountKey=…;BlobEndpoint=…;`, ready to pass to any Azure SDK |
+
+Most SDKs take the connection string directly. In Python, for example,
+`BlobServiceClient.from_connection_string(os.environ["AZURE_STORAGE_CONNECTION_STRING"])`.
+With django-storages, set `AZURE_CONNECTION_STRING` from it.
+
+**The public emulator key does not work.** Stock Azurite accepts the well-known
+`devstoreaccount1` key printed in Microsoft's docs. The chart replaces Azurite's account
+list (`AZURITE_ACCOUNTS`) with the generated key, which disables the built-in one, even
+though the default account *name* is still `devstoreaccount1`. So `UseDevelopmentStorage=true`
+and hard-coded emulator keys get `403`. Use the Secret.
+
+The account key is **rotatable**. Azurite reads it on start, so rotation works in place.
+Set `azurite.account.key` to a new base64 value (`head -c 64 /dev/urandom | base64 -w0`)
+and upgrade/sync. The Job overwrites the Secret, and a `checksum/account-key` annotation
+rolls the Azurite pod by itself. **Restart the consuming app pods yourself**, because
+`envFrom` does not refresh a running pod. SAS URLs signed with the old key stop working.
+To go back to a generated key, clear the value: the key currently in the Secret is then preserved.
+
+Render-time validation fails closed when:
+
+- `account.name` is not 3–24 lowercase letters and digits (the rule real Azure and the SDKs enforce),
+- `account.key` is not valid base64 (clients base64-decode the key to sign requests, so a
+  non-base64 key would otherwise fail every request with an opaque signature mismatch),
+- the ingress is enabled without a `hostname`.
+
+**Renaming the account orphans the data.** Azurite stores blobs per account, so after
+`account.name` changes, the blobs written under the old name are no longer reachable.
+
+The teardown caveat is the same as for the other bootstrapped Secrets. `helm uninstall`
+leaves `azurite-storage-credential` behind, and a reinstall reuses its key. Delete the
+Secret to reset.
+
+**Resetting a generated key while Azurite runs needs a manual restart.** If you delete the
+Secret on a live instance, the next upgrade/sync generates a new key, but the Azurite pod
+is not rolled: the chart only sees a *pinned* key change, so the pod keeps the old key in
+its environment and every app restarted afterwards gets `403`. Restart Azurite as well as
+the apps (`kubectl -n <ns> rollout restart deployment/azurite`), or rotate through
+`account.key` instead, which rolls Azurite by itself.
+
+#### Endpoint
+
+`AZURE_STORAGE_BLOB_ENDPOINT`, and the `BlobEndpoint` in the connection string, is
+resolved in this order:
+
+1. `azurite.endpointUrl`, verbatim (trailing `/` trimmed). It must end in the account path, e.g. `https://blob.example.com/devstoreaccount1`; rendering fails otherwise.
+2. With `azurite.ingress.enabled`: `<endpointScheme>://<ingress.hostname>/<account>` (scheme defaults to `https`).
+3. Otherwise the in-cluster Service: `http://azurite.<namespace>.svc.cluster.local:10000/<account>`.
+
+`DefaultEndpointsProtocol` follows the endpoint's scheme.
+
+#### Exposing Blob storage (SAS URLs)
+
+In-cluster apps need nothing more than the Service. Turn the ingress on when **a browser
+has to reach blobs directly**, e.g. SAS upload/download URLs handed to the frontend. The
+app builds those URLs from the endpoint above, so enabling the ingress also switches the
+Secret's endpoint to the public host:
+
+```yaml
+azurite:
+  enabled: true
+  ingress:
+    enabled: true
+    hostname: blob.alpha-3.example.com   # REQUIRED — rendering fails closed if empty
+    ingressClassName: traefik
+    annotations: {}    # merged over azurite.commonAnnotations; yours win
+    tls: []            # passed through verbatim to spec.tls
+```
+
+The app then reaches Azurite through the ingress too. That is what makes its SAS URLs
+valid in a browser. Azurite is always run with `--disableProductStyleUrl`, so the account
+is read from the first path segment and never from the `Host` header. Any ingress hostname
+works, including one whose first label happens to equal the account name.
+
+**SAS URLs through the ingress: JavaScript and .NET SDKs need the names passed explicitly.**
+These SDKs decide whether an endpoint is path-style from the URL alone: only an IP address
+or a port in 10000–10009 counts. On a normal hostname over 443 they misread
+`https://<host>/devstoreaccount1/api/logo.png` as container `devstoreaccount1`, blob
+`api/logo.png`. Signed requests still work, because the URL itself is right, but a SAS they
+generate from a client object (`blobClient.generateSasUrl()`) is signed for the wrong
+resource and gets `403`. Measured with `@azure/storage-blob`: `200` through port 10000,
+`403` through a hostname on port 80. The fix on the app side is to build the SAS from the
+real names, e.g. `generateBlobSASQueryParameters({containerName, blobName, …}, credential)`,
+and append it to the blob URL. The Python SDK is not affected: its `generate_blob_sas`
+takes the account and container names as arguments, which is also what django-storages
+uses.
+
+The ingress always routes the whole host (`path: /`), and that is deliberately not
+configurable: Azurite reads the account from the **first** path segment, so the blob API
+cannot live under a sub-path such as `/blob`.
+
+There is no chart-fixed `app.togglecorp.com/health-check` annotation, unlike MinIO and
+Mailpit. Azurite has no unauthenticated endpoint that returns `200` (anonymous requests get
+`400`/`403`), which is also why the pod's probes are TCP checks on the blob port.
+
+#### Default containers
+
+The Azurite counterpart of MinIO's `defaultBuckets` + provisioning. List the containers
+an app expects and the chart creates them on install and on every upgrade:
+
+```yaml
+azurite:
+  defaultContainers:
+    - name: api
+      publicAccess: blob     # none (default) | blob | container
+    - backups                # a bare name = private
+```
+
+| `publicAccess` | Anonymous (unsigned) requests can… |
+| --- | --- |
+| `none` | nothing; every request must be signed |
+| `blob` | read a blob if they know its URL; listing stays private |
+| `container` | read blobs and list the container |
+
+**Apps that hand out unsigned media URLs need `blob`.** django-storages without
+`AZURE_URL_EXPIRATION_SECS` (go-api's setup) returns plain URLs, so browsers load files
+anonymously; on a private container they get `403` and images break. Most apps also do not
+create containers themselves (django-storages 1.14 does not), so without this list the
+first upload fails with `404 ContainerNotFound`.
+
+How it works:
+
+- A **post-install/post-upgrade hook Job** (`templates/azurite/provisioning-job.yaml`; ArgoCD
+  runs it as `PostSync`) — the same timing as MinIO's provisioning. Only rendered when the
+  list is non-empty.
+- It runs on the **Azurite image** (Node.js is already in it), talks to the in-cluster
+  Service rather than the ingress, and reads the account key from
+  `azurite-storage-credential`. No extra image, no credentials in values.
+- It **polls for Azurite** for up to `provisioning.waitTimeoutSeconds` (default 300 s),
+  because Helm runs post-install hooks without waiting for the Deployment. A `403` is also
+  waited out, since Azurite may still be rolling onto a rotated key.
+- It is **idempotent**. An existing container counts as success, and `publicAccess` is
+  only rewritten when it differs, with any stored access policies read back and kept.
+  Changing an entry's `publicAccess` takes effect on the next upgrade/sync.
+- It **never deletes**. Removing an entry leaves the container and its blobs in place.
+- Names are validated at render time (3–63 lowercase letters, digits and single hyphens,
+  starting and ending with a letter or digit), as are `publicAccess` and duplicates.
+
+Under ArgoCD, `PostSync` runs after the app is already up, so on a brand-new instance there
+is a short window (until the Job finishes, typically seconds) where the container does not
+exist yet. MinIO's provisioning has the same window.
+
+#### Storage
+
+On by default, like MinIO. Metadata and blob data live on a `local-path` PVC and survive
+restarts. The Deployment uses `Recreate`: the PVC is `ReadWriteOnce`, and two Azurites must
+never share one metadata database.
+
+```yaml
+azurite:
+  persistence:
+    enabled: true
+    storageClass: local-path
+    size: 1Gi          # ignored by local-path (node disk is the real limit)
+```
+
+With `persistence.enabled: false`, Azurite writes to an `emptyDir` bounded by
+`persistence.size` (as its `sizeLimit`), so blobs are lost with the pod. Filling past the
+limit evicts this pod rather than filling the node's disk.
+
+Memory: Azurite holds all blob **metadata** in memory (contents are streamed to disk), so
+memory use grows with the *number* of blobs, not their size. The default 512Mi limit is
+plenty for alpha, but raise it if an instance keeps hundreds of thousands of blobs.
+
+#### Compatibility flags
+
+- `azurite.skipApiVersionCheck` (default `true`) — accept any `x-ms-version`. Azure SDKs raise the API version they send faster than Azurite releases, and a pinned emulator then rejects every request from a newer SDK with *"The API version … is not supported by Azurite"*. Set `false` to test against the strict version.
+- `azurite.loose` (default `false`) — `--loose`: ignore unsupported headers and query parameters instead of failing the request.
+- `azurite.telemetry` (default `false`) — Azurite sends usage telemetry to Microsoft unless told not to, so the chart passes `--disableTelemetry`. Set `true` to allow it.
+- `azurite.extraArgs` (default `[]`) — extra CLI flags, appended verbatim, e.g. `["--silent"]`.
+
+#### `azurite` option reference
+
+- `azurite.enabled` (default `false`).
+- `azurite.fullnameOverride` (default `"azurite"`) — fixed name gives the stable Blob DNS. Clear it for `<release>-azurite-*`.
+- `azurite.secretName` (default empty → `azurite-storage-credential`).
+- `azurite.image.{repository,tag,pullPolicy,pullSecrets}` (default `mcr.microsoft.com/azure-storage/azurite:3.37.0`). The chart runs the image's `azurite-blob` entrypoint.
+- `azurite.account.name` (default `devstoreaccount1`) / `azurite.account.key` (default empty → generated) — see above.
+- `azurite.service.{type,blobPort}` (default `ClusterIP`, `10000`). Azurite binds 10000 inside the container regardless; only the Service side moves (and the in-cluster endpoint follows it).
+- `azurite.ingress.{enabled,ingressClassName,hostname,annotations,tls}` — see above. The path is always `/`.
+- `azurite.endpointScheme` (default `https`) / `azurite.endpointUrl` (default empty) — see [Endpoint](#endpoint).
+- `azurite.{skipApiVersionCheck,loose,telemetry,extraArgs}` — see above.
+- `azurite.defaultContainers` (default `[]`) — see [Default containers](#default-containers).
+- `azurite.provisioning.{waitTimeoutSeconds,backoffLimit,activeDeadlineSeconds,resources}` (default `300`, `3`, `600`, `requests: {cpu: 10m, memory: 64Mi}` / `limits: {cpu: 200m, memory: 128Mi}`) — the provisioning Job. `activeDeadlineSeconds` bounds all attempts, so it must exceed `waitTimeoutSeconds`; rendering fails otherwise.
+- `azurite.persistence.{enabled,storageClass,size,accessModes}` — see above.
+- `azurite.resources` — default `requests: {cpu: 10m, memory: 128Mi}` / `limits: {cpu: 1, memory: 512Mi}`.
+- `azurite.podSecurityContext` / `azurite.containerSecurityContext` — default to uid/gid 1000 (the image's `node` user), `fsGroupChangePolicy: OnRootMismatch`, and the restricted PSS. Neither the Azurite pod nor the provisioning Job mounts a ServiceAccount token (`automountServiceAccountToken: false`); neither calls the Kubernetes API. The image declares **no** `USER`, so without the pod security context it would run as root. `readOnlyRootFilesystem: true` is safe: Azurite writes only to the data volume.
+- `azurite.commonLabels` (default `app.togglecorp.com/component: resources`) — on every Azurite resource; selector-safe.
+- `azurite.commonAnnotations` — on every Azurite resource's metadata and on the bootstrap-created Secret (not on the hook Jobs themselves). Values may contain spaces. The Secret's own `argocd.argoproj.io/sync-options: Prune=false` and `compare-options: IgnoreExtraneous` always win over a same-named key here.
+- `azurite.{affinity,tolerations,nodeSelector}` — `affinity` defaults to the same RAID-avoiding rule as the other components.
+
 ### Enabling Mailpit
 
 A per-instance SMTP catcher. The app points its mail client at
@@ -943,7 +1191,7 @@ No registry secret is needed — the workflow authenticates to GHCR with the bui
 | `lint` | pre-commit hygiene hooks + `helm lint` + `helm unittest` |
 | `unittest` | standalone `helm lint` / `helm unittest` — rendered YAML and the render-time guards |
 | `integration` | `chart/tests/integration/run.sh` — real Postgres containers: the three restore formats, the corrupt-dump failure path, that the rendered parameters actually start Postgres, `pg_ctl -m fast stop` with a client attached, the `/dev/shm` A/B, and that the image still declares `STOPSIGNAL SIGINT` |
-| `e2e` | `chart/tests/e2e/run.sh` — a real cluster via kind: restricted-PSS admission, the secret-bootstrap Helm hooks, `emptyDir{medium: Memory}` sizing and enforcement, the preStop hook and what the runtime does without it, `max_connections` refusing rather than OOM-killing, upgrade rollouts, the restore init container, and Mailpit catching a real SMTP message behind `MP_UI_AUTH_FILE` on a persistent PVC |
+| `e2e` | `chart/tests/e2e/run.sh` — a real cluster via kind: restricted-PSS admission, the secret-bootstrap Helm hooks, `emptyDir{medium: Memory}` sizing and enforcement, the preStop hook and what the runtime does without it, `max_connections` refusing rather than OOM-killing, upgrade rollouts, the restore init container, Mailpit catching a real SMTP message behind `MP_UI_AUTH_FILE` on a persistent PVC, and Azurite serving Shared Key–signed blob requests with the generated key, refusing the public emulator key, keeping blobs across a pod delete, and rotating its key |
 
 Locally, `./prepush.sh` runs everything except the e2e suite, which creates and destroys a
 kind cluster and so is opt-in:
