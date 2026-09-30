@@ -1,5 +1,13 @@
 # Changelog
 
+## [v0.5.0-dev0](https://github.com/toggle-corp/banjo-alpha-deps/compare/v0.4.0..v0.5.0-dev0) - 2026-09-30
+### Changes:
+
+#### 🚀  Features
+
+- *(chart)* Add per-instance Azurite Blob Storage emulator - ([ba53a6a](https://github.com/toggle-corp/banjo-alpha-deps/commit/ba53a6a0e7e9a6a6417bab883502fc27c598b440))
+
+
 ## [v0.4.0](https://github.com/toggle-corp/banjo-alpha-deps/compare/v0.3.0..v0.4.0) - 2026-09-02
 ### Changes:
 
