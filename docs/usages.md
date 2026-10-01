@@ -745,7 +745,7 @@ python3 scripts/vendor-plan.py
 
 **Docker Hub rate limits.** The workflow reads `bitnamilegacy/*` anonymously unless the optional `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` secrets are set, and anonymous pulls share one quota across the whole runner IP. Because releases depend on this job, a re-release whose tags are all vendored already makes no required Docker Hub call at all — upstream is read only to report drift, and failing to read it is not fatal.
 
-**One-time setup per image.** GHCR packages are private when first published. A newly added image needs its visibility set to public once, in the `toggle-corp/banjo-alpha-deps` package settings — otherwise every install needs an `imagePullSecret`.
+**Package visibility.** A package pushed with `GITHUB_TOKEN` is linked to this repository and inherits its visibility, so while `toggle-corp/banjo-alpha-deps` is public the vendored images are anonymously pullable and no install needs an `imagePullSecret`. Nothing has to be flipped by hand for a newly vendored image. Were the repository ever made private, images vendored after that point would be private too and would need either an `imagePullSecret` or their visibility set explicitly in the package settings.
 
 **Trade-off: the vendored images are still frozen at the pre-cutover build** — no future security patches, wherever they are served from. Vendoring removes the availability risk, not the patching one. Acceptable for alpha; **not** for production. For prod, either set `minio.image.registry: docker.io` / `minio.image.repository: bitnami/<name>` (and the other three) and supply pull secrets for a Bitnami Secure Images subscription, or migrate off the Bitnami chart entirely.
 

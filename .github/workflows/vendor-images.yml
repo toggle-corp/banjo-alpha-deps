@@ -199,13 +199,3 @@ jobs:
             fi
             echo "- \`$dest\` — published (\`$src_digest\`)" >> "$GITHUB_STEP_SUMMARY"
           done
-
-      - name: Note package visibility
-        run: |
-          {
-            echo
-            echo 'GHCR packages are private when first published. A newly added image'
-            echo 'needs its visibility set to public once, under the'
-            echo '`toggle-corp/banjo-alpha-deps` package settings — otherwise every'
-            echo 'install has to carry an imagePullSecret.'
-          } >> "$GITHUB_STEP_SUMMARY"
