@@ -15,9 +15,23 @@ env:
   OCI_REGISTRY: oci://ghcr.io/toggle-corp
 
 jobs:
+  # The chart renders image references into ghcr.io/toggle-corp/banjo-alpha-deps/*.
+  # Vendoring first means a published chart can never point at a tag that was
+  # never copied. Vendoring is idempotent, so this is a no-op on a re-release.
+  vendor:
+    name: Vendor images
+    uses: ./.github/workflows/vendor-images.yml
+    permissions:
+      contents: read
+      packages: write
+    secrets:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+
   release:
     name: Publish chart and GitHub Release
     runs-on: ubuntu-24.04
+    needs: vendor
 
     steps:
       - name: Checkout

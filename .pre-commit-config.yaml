@@ -33,6 +33,13 @@ repos:
         pass_filenames: false
         files: ^chart/(Chart\.(yaml|lock)|values\.yaml|templates/|scripts/|tests/|charts/garage/)
 
+      - id: vendored-images
+        name: vendored images
+        entry: scripts/check-vendored-images.sh
+        language: system
+        pass_filenames: false
+        files: ^(chart/(Chart\.(yaml|lock)|values\.yaml)|scripts/(vendor-plan\.py|check-vendored-images\.sh))$
+
       - id: shellcheck
         name: shellcheck
         entry: shellcheck

@@ -1,0 +1,211 @@
+name: Vendor images
+
+# Republishes the container images the MinIO subchart pulls into
+# ghcr.io/toggle-corp/banjo-alpha-deps/*, so an install never depends on
+# `bitnamilegacy/*` staying up. Bitnami already withdrew the `bitnami/*` repos
+# these forked from, and the legacy mirror carries no commitment to outlive them.
+#
+# scripts/vendor-plan.py derives what to copy from chart/values.yaml and the
+# pinned subchart, so the tags vendored here are exactly the ones the chart
+# renders. Copies are made with `docker buildx imagetools create`, which
+# republishes the original manifest list byte-for-byte: same digests, every
+# architecture, no rebuild.
+#
+# Tags are write-once. A destination tag already in GHCR is left exactly as it
+# was first published, even when the upstream tag has since been repointed at a
+# different digest — a mutated upstream tag is reported and not followed, so
+# what a cluster pulls for a given tag never changes underneath it. Only an
+# absent destination is written, which makes re-running a no-op.
+#
+# The `overwrite` dispatch input forces a re-push when a tag genuinely has to be
+# replaced.
+
+on:
+  workflow_dispatch:
+    inputs:
+      overwrite:
+        description: "Re-push tags that already exist in GHCR"
+        type: boolean
+        default: false
+  workflow_call:
+    secrets:
+      # Optional. Without them Docker Hub is read anonymously, which shares a
+      # rate limit with every other job on the runner's IP.
+      DOCKERHUB_USERNAME:
+        required: false
+      DOCKERHUB_TOKEN:
+        required: false
+  push:
+    branches: [main]
+    paths:
+      - chart/Chart.yaml
+      - chart/Chart.lock
+      - chart/values.yaml
+      - scripts/vendor-plan.py
+      - .github/workflows/vendor-images.yml
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  # Pushes to the same tags must not race; queue them instead of cancelling, so
+  # a superseded run still finishes what it started.
+  group: vendor-images
+  cancel-in-progress: false
+
+jobs:
+  vendor:
+    name: Vendor to GHCR
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PyYAML
+        run: pip install --disable-pip-version-check pyyaml
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Fetch chart dependencies
+        # The plan reads the pinned tags out of chart/charts/minio-*.tgz, which
+        # is gitignored.
+        run: helm dep build chart
+
+      - name: Build the vendor plan
+        run: |
+          python3 scripts/vendor-plan.py > plan.json
+          {
+            echo '### Vendor plan'
+            echo
+            echo '```json'
+            cat plan.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Log in to GHCR
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" |
+            docker login ghcr.io --username "$GHCR_USER" --password-stdin
+
+      - name: Log in to Docker Hub
+        # Anonymous pulls share Docker Hub's rate limit across the whole runner
+        # IP. The login is optional so the workflow still runs in a fork or
+        # before the secrets exist.
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [[ -n "${DOCKERHUB_TOKEN:-}" ]]; then
+            printf '%s' "$DOCKERHUB_TOKEN" |
+              docker login docker.io --username "$DOCKERHUB_USERNAME" --password-stdin
+          else
+            echo "::notice::No DOCKERHUB_TOKEN secret; reading Docker Hub anonymously."
+          fi
+
+      - name: Copy images
+        shell: bash
+        env:
+          # Empty on every trigger but workflow_dispatch.
+          OVERWRITE: ${{ github.event.inputs.overwrite }}
+        run: |
+          set -euo pipefail
+
+          # Echoes the digest when it resolves, otherwise the registry's error
+          # text. 0 = present, 10 = definitively absent, 1 = could not tell
+          # (5xx, rate limit, token scope, DNS). Treating a could-not-tell as
+          # absent would re-push the tag and break write-once, so the three
+          # cases stay distinct and the caller decides. Runs in a command
+          # substitution, so everything it reports has to come back on stdout.
+          digest() {
+            local out
+            if out="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$1" 2>&1)"; then
+              printf '%s' "$out"
+              return 0
+            fi
+            printf '%s' "$out"
+            if grep -qiE 'not found|manifest unknown|name unknown|no such manifest|failed to resolve' <<<"$out"; then
+              return 10
+            fi
+            return 1
+          }
+
+          readarray -t rows < <(jq -c '.[]' plan.json)
+          for row in "${rows[@]}"; do
+            src="$(jq -r .src <<<"$row")"
+            dest="$(jq -r .dest <<<"$row")"
+
+            dest_rc=0
+            dest_probe="$(digest "$dest")" || dest_rc=$?
+            if [[ "$dest_rc" -eq 1 ]]; then
+              echo "::error::cannot tell whether $dest exists, refusing to touch it: $dest_probe"
+              exit 1
+            fi
+            dest_digest=""
+            if [[ "$dest_rc" -eq 0 ]]; then
+              dest_digest="$dest_probe"
+            fi
+
+            if [[ "$dest_rc" -eq 0 && "$OVERWRITE" != "true" ]]; then
+              # Already published, so it is kept either way. Reading upstream is
+              # purely to report drift — a Docker Hub outage must not fail a
+              # release whose tags are all vendored already.
+              src_rc=0
+              src_probe="$(digest "$src")" || src_rc=$?
+              src_digest="$src_probe"
+              if [[ "$src_rc" -ne 0 ]]; then
+                echo "== published: $dest ($dest_digest); upstream unreadable, not compared"
+                echo "- \`$dest\` — already published (\`$dest_digest\`); upstream not read" >> "$GITHUB_STEP_SUMMARY"
+              elif [[ "$src_digest" == "$dest_digest" ]]; then
+                echo "== published: $dest ($dest_digest)"
+                echo "- \`$dest\` — already published (\`$dest_digest\`)" >> "$GITHUB_STEP_SUMMARY"
+              else
+                # Upstream repointed the tag. Following it would change what a
+                # cluster pulls for a tag it has already rolled out.
+                echo "::warning::$dest stays at $dest_digest; upstream $src now resolves to $src_digest"
+                {
+                  echo "- \`$dest\` — kept at \`$dest_digest\`;" \
+                       "upstream now resolves to \`$src_digest\`." \
+                       "Re-run with \`overwrite\` to follow it."
+                } >> "$GITHUB_STEP_SUMMARY"
+              fi
+              continue
+            fi
+
+            src_rc=0
+            src_digest="$(digest "$src")" || src_rc=$?
+            if [[ "$src_rc" -ne 0 ]]; then
+              echo "::error::cannot read $src: $src_digest"
+              exit 1
+            fi
+
+            echo "== copying $src -> $dest"
+            docker buildx imagetools create --tag "$dest" "$src"
+
+            copied_rc=0
+            copied_digest="$(digest "$dest")" || copied_rc=$?
+            if [[ "$copied_rc" -ne 0 || "$copied_digest" != "$src_digest" ]]; then
+              echo "::error::$dest reads back as '$copied_digest' but $src is $src_digest"
+              exit 1
+            fi
+            echo "- \`$dest\` — published (\`$src_digest\`)" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Note package visibility
+        run: |
+          {
+            echo
+            echo 'GHCR packages are private when first published. A newly added image'
+            echo 'needs its visibility set to public once, under the'
+            echo '`toggle-corp/banjo-alpha-deps` package settings — otherwise every'
+            echo 'install has to carry an imagePullSecret.'
+          } >> "$GITHUB_STEP_SUMMARY"

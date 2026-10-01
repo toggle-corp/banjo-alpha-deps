@@ -699,11 +699,56 @@ The baked-in `chart/values.yaml` defaults already wire all of this with a 100 Mi
 
 **Rotation caveat.** Changing `minioConfig.secretAccessKey` (or the access key id) rewrites the Secret but does **not** restart pods automatically — you must manually restart both the MinIO pod(s) and the app pods for the new credentials to take effect. Any previously-issued presigned URLs break once the key rotates.
 
-**Bitnami image-distribution caveat (Aug 2025).** Bitnami moved every public `bitnami/*` Docker repo to subscription-only (Bitnami Secure Images). The chart's pinned defaults reference those gated repos; a vanilla install would 401 on every image pull.
+#### MinIO images are vendored into our own GHCR
 
-`chart/values.yaml` works around this by overriding all four image repositories the chart can pull (`image`, `clientImage`, `console.image`, `defaultInitContainers.volumePermissions.image`) to their `bitnamilegacy/*` equivalents — a frozen free mirror of the pre-cutover images. Tags are inherited from the chart's own pinned defaults; the same tags exist on bitnamilegacy, so versions stay in lockstep with whatever Chart.yaml's pinned `version:` was published with.
+**Background (Aug 2025).** Bitnami moved every public `bitnami/*` Docker repo to subscription-only (Bitnami Secure Images). The subchart's pinned defaults still reference those gated repos, so a vanilla install would 401 on every image pull. The free `bitnamilegacy/*` mirror of the pre-cutover images fills the gap, but it is published as-is and can be withdrawn the same way `bitnami/*` was — exactly what MinIO did to its own `docker.io/minio/*` images.
 
-Trade-off: `bitnamilegacy/*` is frozen — no future security patches. Acceptable for alpha; **not** for production. For prod, either restore `image.repository: bitnami/<name>` (and the other three) and supply pull secrets for a Bitnami Secure Images subscription, or migrate off the Bitnami chart entirely (e.g. `minio/operator`).
+So the chart does not depend on it. All four images the subchart can pull are republished into **`ghcr.io/toggle-corp/banjo-alpha-deps/*`**, and `chart/values.yaml` points at them by default:
+
+| values path | image |
+| --- | --- |
+| `minio.image` | `ghcr.io/toggle-corp/banjo-alpha-deps/minio` |
+| `minio.clientImage` | `ghcr.io/toggle-corp/banjo-alpha-deps/minio-client` |
+| `minio.console.image` | `ghcr.io/toggle-corp/banjo-alpha-deps/minio-object-browser` |
+| `minio.defaultInitContainers.volumePermissions.image` | `ghcr.io/toggle-corp/banjo-alpha-deps/os-shell` |
+
+Only `registry` and `repository` are overridden. **`tag` stays inherited** from the subchart's own pinned defaults, and the vendor workflow reads those same defaults out of the pinned subchart — so bumping the subchart version in `Chart.yaml` moves both sides together, with no tag to maintain by hand.
+
+`minio.clientImage` backs no rendered workload in subchart 17.x (the provisioning Job runs `mc` out of the server image). It is vendored anyway because the subchart's install notes hand it to operators as a `kubectl run` debug one-liner.
+
+**`minio.global.security.allowInsecureImages: true` is required.** The Bitnami common library aborts rendering when an image resolves to a registry outside `docker.io/bitnami*`, which every vendored reference does. The waiver is set under `minio.global` rather than the chart-wide `global:` so that a Bitnami subchart added later does not silently inherit a disabled image-substitution guard. The images behind it are byte-for-byte republications — same digests, every architecture — not substitute builds.
+
+**How vendoring works.** `.github/workflows/vendor-images.yml` copies each image with `docker buildx imagetools create`, which republishes the original manifest list without rebuilding. It runs on `workflow_dispatch`, on pushes to `main` that touch `chart/Chart.yaml`, `chart/Chart.lock`, `chart/values.yaml`, `scripts/vendor-plan.py` or the workflow itself, and as a prerequisite job of the release workflow — so a published chart can never reference a tag that was never copied.
+
+**Vendored tags are write-once.** Only a destination tag that is *definitively* absent from GHCR gets written. A registry error that leaves it unclear whether the tag exists fails the run rather than re-pushing. A tag already published keeps the digest it was first published with, so what a cluster pulls for a given tag never changes underneath it, and re-running the workflow is a no-op.
+
+That also means an upstream tag being repointed at a new digest is *not* followed. The run reports it as a warning and keeps the published tag:
+
+```
+⚠ ghcr.io/toggle-corp/banjo-alpha-deps/minio:<tag> stays at sha256:<ours>;
+  upstream docker.io/bitnamilegacy/minio:<tag> now resolves to sha256:<theirs>
+```
+
+Normally the right response is to bump the subchart in `Chart.yaml`, which brings a new tag that vendors cleanly. To genuinely replace a published tag instead, run the workflow from the Actions tab with the **`overwrite`** input checked.
+
+`scripts/vendor-plan.py` prints the plan (source → destination for all four images) and is the single derivation both the workflow and the checks use. Run it locally after `helm dep build chart`:
+
+```sh
+python3 scripts/vendor-plan.py
+```
+
+`scripts/check-vendored-images.sh` renders the chart with every optional MinIO image enabled and asserts that **every image the subchart renders** appears in that plan. It runs in `pre-commit` and CI, and covers three failures `helm unittest` cannot see:
+
+- the waiver above going missing — the error is raised from `NOTES.txt`, which helm-unittest does not render;
+- an image reference drifting away from what is vendored;
+- a subchart bump introducing a *new* image the plan does not know about. The assertion deliberately runs render → plan rather than plan → render, because an unvendored image renders from a gated `bitnami/*` repo and would otherwise simply go unnoticed until it 401s on install.
+
+**Docker Hub rate limits.** The workflow reads `bitnamilegacy/*` anonymously unless the optional `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` secrets are set, and anonymous pulls share one quota across the whole runner IP. Because releases depend on this job, a re-release whose tags are all vendored already makes no required Docker Hub call at all — upstream is read only to report drift, and failing to read it is not fatal.
+
+**One-time setup per image.** GHCR packages are private when first published. A newly added image needs its visibility set to public once, in the `toggle-corp/banjo-alpha-deps` package settings — otherwise every install needs an `imagePullSecret`.
+
+**Trade-off: the vendored images are still frozen at the pre-cutover build** — no future security patches, wherever they are served from. Vendoring removes the availability risk, not the patching one. Acceptable for alpha; **not** for production. For prod, either set `minio.image.registry: docker.io` / `minio.image.repository: bitnami/<name>` (and the other three) and supply pull secrets for a Bitnami Secure Images subscription, or migrate off the Bitnami chart entirely.
+
 ### Enabling Mailpit
 
 A per-instance SMTP catcher. The app points its mail client at
@@ -940,10 +985,17 @@ No registry secret is needed — the workflow authenticates to GHCR with the bui
 
 | job | what it covers |
 | --- | --- |
-| `lint` | pre-commit hygiene hooks + `helm lint` + `helm unittest` |
+| `lint` | pre-commit hygiene hooks + `helm lint` + `helm unittest` + `scripts/check-vendored-images.sh` |
 | `unittest` | standalone `helm lint` / `helm unittest` — rendered YAML and the render-time guards |
 | `integration` | `chart/tests/integration/run.sh` — real Postgres containers: the three restore formats, the corrupt-dump failure path, that the rendered parameters actually start Postgres, `pg_ctl -m fast stop` with a client attached, the `/dev/shm` A/B, and that the image still declares `STOPSIGNAL SIGINT` |
 | `e2e` | `chart/tests/e2e/run.sh` — a real cluster via kind: restricted-PSS admission, the secret-bootstrap Helm hooks, `emptyDir{medium: Memory}` sizing and enforcement, the preStop hook and what the runtime does without it, `max_connections` refusing rather than OOM-killing, upgrade rollouts, the restore init container, and Mailpit catching a real SMTP message behind `MP_UI_AUTH_FILE` on a persistent PVC |
+
+[`.github/workflows/vendor-images.yml`](../.github/workflows/vendor-images.yml) runs
+separately — on `workflow_dispatch`, on pushes to `main` touching `chart/Chart.yaml`,
+`chart/Chart.lock`, `chart/values.yaml`, `scripts/vendor-plan.py` or the workflow itself,
+and as a prerequisite of the release workflow.
+It republishes the MinIO subchart's images into `ghcr.io/toggle-corp/banjo-alpha-deps/*`;
+see [Enabling MinIO](#minio-images-are-vendored-into-our-own-ghcr).
 
 Locally, `./prepush.sh` runs everything except the e2e suite, which creates and destroys a
 kind cluster and so is opt-in:

@@ -28,6 +28,11 @@ jobs:
         # The local `helm-unittest` pre-commit hook shells out to this.
         run: helm plugin install https://github.com/helm-unittest/helm-unittest.git --version 1.1.1 --verify=false
 
+      - name: Install PyYAML
+        # The local `vendored-images` pre-commit hook shells out to
+        # scripts/vendor-plan.py, which parses the chart values.
+        run: pip install --disable-pip-version-check pyyaml
+
       - name: Fetch chart dependencies
         # `helm lint` resolves subcharts from Chart.lock; the .tgz files are gitignored.
         run: helm dep build chart

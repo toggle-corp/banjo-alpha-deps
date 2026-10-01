@@ -366,16 +366,24 @@ dragonfly:
 # NOTE: Bitnami restructured image distribution in Aug 2025 — the public
 # `bitnami/*` repos went subscription-gated (Bitnami Secure Images). The chart
 # still pins those repos as defaults, so a vanilla install will 401 on pull.
+# The free `bitnamilegacy/*` mirror of the pre-cutover images carries no
+# support commitment and can be withdrawn the same way `bitnami/*` was.
 #
-# We override every image the chart can pull to `bitnamilegacy/*` — a frozen
-# free mirror of the pre-cutover images. Tags are inherited from the chart's
-# own pinned defaults (the same tags exist on bitnamilegacy, so versions stay
-# in lockstep with whatever Chart.yaml's `version:` was published with).
+# Every image the chart can pull is therefore vendored into our own GHCR
+# namespace, `ghcr.io/toggle-corp/banjo-alpha-deps/*`, by
+# .github/workflows/vendor-images.yml (`docker buildx imagetools create`, so
+# the copy is digest-identical and keeps every architecture).
 #
-# Trade-off: `bitnamilegacy/*` is frozen — no future security patches. Fine
-# for alpha. For production, set `image.repository: bitnami/<name>` (and the
-# other three) back to bitnami and supply pull secrets for a Bitnami Secure
-# Images subscription, or migrate off the Bitnami chart entirely.
+# Only the registry and repository are overridden — `tag` is inherited from
+# the subchart's own pinned defaults, and the vendor workflow reads those same
+# defaults out of the pinned subchart. Versions therefore stay in lockstep
+# with Chart.yaml's `version:` with nothing to bump by hand here.
+#
+# Trade-off: the vendored images are frozen at the pre-cutover build — no
+# future security patches, wherever they are served from. Fine for alpha. For
+# production, set `image.registry: docker.io` / `image.repository:
+# bitnami/<name>` (and the other three) and supply pull secrets for a Bitnami
+# Secure Images subscription, or migrate off the Bitnami chart entirely.
 #
 # MinIO standalone for alpha. The topology below (standalone mode, WebUI off,
 # Traefik ingress, single-node persistence) is baked in; a per-install overlay
@@ -405,19 +413,26 @@ minio:
     rootUserSecretKey: S3_ACCESS_KEY_ID
     rootPasswordSecretKey: S3_SECRET_ACCESS_KEY
   image:
-    repository: bitnamilegacy/minio
+    registry: ghcr.io
+    repository: toggle-corp/banjo-alpha-deps/minio
+  # Unused by any rendered workload in subchart 17.x — the provisioning Job runs
+  # `mc` out of the main minio image. It backs the `kubectl run` debug one-liner
+  # in the subchart's NOTES, so it is vendored and pinned alongside the rest.
   clientImage:
-    repository: bitnamilegacy/minio-client
+    registry: ghcr.io
+    repository: toggle-corp/banjo-alpha-deps/minio-client
   console:
     enabled: false
     image:
-      repository: bitnamilegacy/minio-object-browser
+      registry: ghcr.io
+      repository: toggle-corp/banjo-alpha-deps/minio-object-browser
   defaultInitContainers:
     volumePermissions:
       # Off by default upstream; pinned here so flipping `enabled: true` in an
       # overlay doesn't silently fall back to the gated bitnami/os-shell repo.
       image:
-        repository: bitnamilegacy/os-shell
+        registry: ghcr.io
+        repository: toggle-corp/banjo-alpha-deps/os-shell
   disableWebUI: true
   mode: standalone
   ingress:
@@ -453,6 +468,15 @@ minio:
       memory: 1Gi
   global:
     defaultStorageClass: "local-path"
+    security:
+      # The subchart aborts rendering when an image resolves to a registry
+      # outside `docker.io/bitnami*` (its bundled common/templates/_errors.tpl),
+      # which every vendored reference does. Scoped to this subchart rather than
+      # the chart-wide `global:` so a Bitnami subchart added later does not
+      # silently inherit a disabled image-substitution guard. The images behind
+      # the waiver are byte-for-byte copies of the `bitnamilegacy/*` images the
+      # subchart pins — same digests, not substitute builds.
+      allowInsecureImages: true
   persistence:
     enabled: true
     storageClass: "local-path"

@@ -1,0 +1,63 @@
+suite: minio images resolve to the vendored GHCR copies
+# Every image the MinIO subchart can pull is served from
+# ghcr.io/toggle-corp/banjo-alpha-deps/* (vendored by
+# .github/workflows/vendor-images.yml) rather than from bitnamilegacy/*, which
+# carries no commitment to stay published. Tags stay inherited from the
+# subchart's own pinned defaults, so they are asserted by prefix — a subchart
+# bump changes the tag without touching this suite.
+#
+# The waiver these references depend on (global.security.allowInsecureImages)
+# is not covered here: it is enforced from the subchart's NOTES.txt, which
+# helm-unittest does not render. scripts/check-vendored-images.sh covers it.
+templates:
+  - charts/minio/templates/**.yaml
+tests:
+  - it: pulls the server image from GHCR
+    set:
+      minio.enabled: true
+      minio.auth.rootPassword: "unit-test-pw"
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: ^ghcr\.io/toggle-corp/banjo-alpha-deps/minio:.+$
+        template: charts/minio/templates/application.yaml
+
+  - it: pulls the console image from GHCR
+    set:
+      minio.enabled: true
+      minio.auth.rootPassword: "unit-test-pw"
+      minio.console.enabled: true
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: ^ghcr\.io/toggle-corp/banjo-alpha-deps/minio-object-browser:.+$
+        template: charts/minio/templates/console/deployment.yaml
+
+  - it: pulls the provisioning Job's images from GHCR
+    # The Job waits on MinIO from an os-shell init container, then runs `mc` out
+    # of the server image — the subchart's `clientImage` backs no workload.
+    set:
+      minio.enabled: true
+      minio.auth.rootPassword: "unit-test-pw"
+      minio.provisioning.enabled: true
+      minio.defaultBuckets: "unit-test-bucket"
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].image
+          pattern: ^ghcr\.io/toggle-corp/banjo-alpha-deps/os-shell:.+$
+        template: charts/minio/templates/provisioning/job.yaml
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: ^ghcr\.io/toggle-corp/banjo-alpha-deps/minio:.+$
+        template: charts/minio/templates/provisioning/job.yaml
+
+  - it: pulls the volume-permissions init image from GHCR
+    set:
+      minio.enabled: true
+      minio.auth.rootPassword: "unit-test-pw"
+      minio.defaultInitContainers.volumePermissions.enabled: true
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].image
+          pattern: ^ghcr\.io/toggle-corp/banjo-alpha-deps/os-shell:.+$
+        template: charts/minio/templates/application.yaml

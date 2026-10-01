@@ -10,7 +10,7 @@ pre-commit run --all-files
 
 echo
 echo "==> shellcheck (covers untracked files too — pre-commit skips those)"
-find chart/scripts chart/tests/integration prepush.sh -name '*.sh' -print0 | xargs -0 shellcheck
+find chart/scripts chart/tests/integration scripts prepush.sh -name '*.sh' -print0 | xargs -0 shellcheck
 
 echo
 echo "==> integration tests (Docker, ~30s)"
