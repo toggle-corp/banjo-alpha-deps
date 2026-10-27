@@ -1,0 +1,137 @@
+{{- if .Values.azurite.enabled }}
+{{- $account := include "azurite.accountName" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ template "azurite.fullname" . }}
+  labels:
+    {{- include "azurite.labels" . | nindent 4 }}
+  {{- with .Values.azurite.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: 1
+  # Recreate, not RollingUpdate: the data PVC is ReadWriteOnce, so a second pod
+  # would block on the volume — and two Azurites must never share one LokiJS
+  # metadata file, which each holds in memory and rewrites wholesale.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "azurite.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "azurite.podLabels" . | nindent 8 }}
+      {{- if .Values.azurite.account.key }}
+      annotations:
+        # The generated key lives only in the cluster, but a pinned one is known
+        # at render time, so rotating it through the value also rolls Azurite.
+        # (The app still needs restarting — envFrom does not refresh a pod.)
+        checksum/account-key: {{ .Values.azurite.account.key | sha256sum }}
+      {{- end }}
+    spec:
+      {{- with .Values.azurite.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # Azurite never calls the Kubernetes API, so it gets no token to leak.
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.azurite.podSecurityContext | nindent 8 }}
+      containers:
+        - name: azurite
+          image: "{{ .Values.azurite.image.repository }}:{{ .Values.azurite.image.tag }}"
+          imagePullPolicy: {{ .Values.azurite.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.azurite.containerSecurityContext | nindent 12 }}
+          # Blob service only. The image's default command starts the queue and
+          # table services too; `azurite-blob` is the same build with just blob.
+          command:
+            - azurite-blob
+          args:
+            - --blobHost
+            - 0.0.0.0
+            - --blobPort
+            - "10000"
+            - --location
+            - {{ include "azurite.dataDir" . }}
+            # Always path-style (`/<account>/<container>`). Without this Azurite
+            # also tries to read the account out of the Host header, so an
+            # ingress hostname whose first label happens to equal an account
+            # name would silently switch URL styles.
+            - --disableProductStyleUrl
+            {{- if not .Values.azurite.telemetry }}
+            - --disableTelemetry
+            {{- end }}
+            {{- if .Values.azurite.skipApiVersionCheck }}
+            - --skipApiVersionCheck
+            {{- end }}
+            {{- if .Values.azurite.loose }}
+            - --loose
+            {{- end }}
+            {{- range .Values.azurite.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          ports:
+            - name: blob
+              containerPort: 10000
+              protocol: TCP
+          env:
+            - name: AZURITE_ACCOUNT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "azurite.secretName" . }}
+                  key: AZURE_STORAGE_ACCOUNT_KEY
+            # Replacing the account list also disables Azurite's built-in
+            # `devstoreaccount1`, whose key is published in Microsoft's docs —
+            # so the generated key is the only one that works.
+            - name: AZURITE_ACCOUNTS
+              value: "{{ $account }}:$(AZURITE_ACCOUNT_KEY)"
+          # TCP, not HTTP: Azurite has no unauthenticated health endpoint —
+          # anonymous requests get 400/403, which an httpGet probe counts as
+          # failure.
+          livenessProbe:
+            tcpSocket:
+              port: blob
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          readinessProbe:
+            tcpSocket:
+              port: blob
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          {{- with .Values.azurite.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ include "azurite.dataDir" . }}
+      {{- with .Values.azurite.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.azurite.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.azurite.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        - name: data
+          {{- if .Values.azurite.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ template "azurite.fullname" . }}-data
+          {{- else }}
+          # Bounded: an unbounded emptyDir grows until the node disk fills and
+          # the kubelet evicts bystander pods. Overshooting evicts this pod.
+          emptyDir:
+            sizeLimit: {{ required "azurite.persistence.size is required" .Values.azurite.persistence.size | quote }}
+          {{- end }}
+{{- end }}

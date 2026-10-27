@@ -1,0 +1,38 @@
+{{- if and .Values.azurite.enabled .Values.azurite.ingress.enabled }}
+{{- $ing := .Values.azurite.ingress }}
+{{- if not $ing.hostname }}
+{{- fail "azurite.ingress.hostname is required when azurite.ingress.enabled is true" }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ template "azurite.fullname" . }}
+  labels:
+    {{- include "azurite.labels" . | nindent 4 }}
+  {{- $annotations := merge (deepCopy (default dict $ing.annotations)) (default dict .Values.azurite.commonAnnotations) }}
+  {{- with $annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with $ing.ingressClassName }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  rules:
+    - host: {{ $ing.hostname | quote }}
+      http:
+        paths:
+          # Always `/`: Azurite reads the account from the FIRST path segment,
+          # so the blob API cannot live under a sub-path. Not configurable.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ template "azurite.fullname" . }}
+                port:
+                  number: {{ .Values.azurite.service.blobPort }}
+  {{- with $ing.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

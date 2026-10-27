@@ -1,0 +1,224 @@
+suite: azurite container provisioning job
+# azurite.defaultContainers → a post-install/post-upgrade hook Job that creates
+# the containers and applies their public access (the Azurite counterpart of
+# MinIO's defaultBuckets + provisioning). These tests pin the render-time side;
+# the Node script's runtime behaviour is exercised by the e2e suite.
+templates:
+  - templates/azurite/provisioning-job.yaml
+release:
+  name: my-release
+  namespace: alpha-3
+set:
+  azurite.enabled: true
+tests:
+  # --- Gating ---------------------------------------------------------------
+  - it: renders nothing while defaultContainers is empty
+    asserts:
+      - hasDocuments: { count: 0 }
+
+  - it: renders nothing when azurite is disabled, even with containers listed
+    set:
+      azurite.enabled: false
+      azurite.defaultContainers: [api]
+    asserts:
+      - hasDocuments: { count: 0 }
+
+  - it: does not validate containers while azurite is disabled
+    # A shared overlay may keep a list for a component that is switched off.
+    set:
+      azurite.enabled: false
+      azurite.defaultContainers: [Not_Valid, Not_Valid]
+    asserts:
+      - hasDocuments: { count: 0 }
+
+  - it: rejects a deadline that does not exceed the wait timeout
+    set:
+      azurite.defaultContainers: [api]
+      azurite.provisioning.waitTimeoutSeconds: 900
+      azurite.provisioning.activeDeadlineSeconds: 600
+    asserts:
+      - failedTemplate:
+          errorMessage: "azurite.provisioning.activeDeadlineSeconds (600) must exceed waitTimeoutSeconds (900) — the deadline bounds the whole Job, so Kubernetes would kill it mid-wait with no useful log"
+
+  - it: renders one Job when containers are listed
+    set:
+      azurite.defaultContainers: [api]
+    asserts:
+      - hasDocuments: { count: 1 }
+      - isKind: { of: Job }
+      - equal: { path: metadata.name, value: azurite-provisioning }
+
+  # --- Hook annotations -----------------------------------------------------
+  - it: runs post-install/post-upgrade, like MinIO's provisioning
+    set:
+      azurite.defaultContainers: [api]
+      azurite.commonAnnotations:
+        argocd.argoproj.io/sync-wave: "-1"
+    asserts:
+      - equal:
+          path: 'metadata.annotations["helm.sh/hook"]'
+          value: post-install,post-upgrade
+      - equal:
+          path: 'metadata.annotations["helm.sh/hook-weight"]'
+          value: "0"
+      - equal:
+          path: 'metadata.annotations["helm.sh/hook-delete-policy"]'
+          value: before-hook-creation
+      # commonAnnotations never reach a hook resource.
+      - equal:
+          path: 'metadata.annotations["argocd.argoproj.io/sync-wave"]'
+          value: "0"
+      - notExists:
+          path: 'metadata.annotations["argocd.argoproj.io/hook"]'
+
+  # --- Container list -------------------------------------------------------
+  - it: passes one name=access line per container, a bare name meaning none
+    set:
+      azurite.defaultContainers:
+        - name: api
+          publicAccess: blob
+        - backups
+        - name: listing
+          publicAccess: container
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CONTAINERS
+            value: "api=blob\nbackups=none\nlisting=container"
+
+  - it: rejects an uppercase container name
+    set:
+      azurite.defaultContainers: [Media]
+    asserts:
+      - failedTemplate:
+          errorMessage: 'azurite.defaultContainers[0]: "Media" is not a valid container name — use 3-63 lowercase letters, digits and single hyphens, starting and ending with a letter or digit'
+
+  - it: rejects a name with a double hyphen
+    set:
+      azurite.defaultContainers: [my--media]
+    asserts:
+      - failedTemplate:
+          errorMessage: 'azurite.defaultContainers[0]: "my--media" is not a valid container name — use 3-63 lowercase letters, digits and single hyphens, starting and ending with a letter or digit'
+
+  - it: rejects a name shorter than 3 characters
+    set:
+      azurite.defaultContainers: [ab]
+    asserts:
+      - failedTemplate:
+          errorMessage: 'azurite.defaultContainers[0]: "ab" is not a valid container name — use 3-63 lowercase letters, digits and single hyphens, starting and ending with a letter or digit'
+
+  - it: rejects a map entry without a name
+    set:
+      azurite.defaultContainers:
+        - publicAccess: blob
+    asserts:
+      - failedTemplate:
+          errorMessage: 'azurite.defaultContainers[0]: "" is not a valid container name — use 3-63 lowercase letters, digits and single hyphens, starting and ending with a letter or digit'
+
+  - it: rejects an unknown publicAccess
+    set:
+      azurite.defaultContainers:
+        - name: api
+          publicAccess: public
+    asserts:
+      - failedTemplate:
+          errorMessage: 'azurite.defaultContainers[0] (api): publicAccess "public" must be none, blob or container'
+
+  - it: rejects a container listed twice
+    set:
+      azurite.defaultContainers:
+        - api
+        - name: api
+          publicAccess: blob
+    asserts:
+      - failedTemplate:
+          errorMessage: 'azurite.defaultContainers: "api" is listed twice'
+
+  # --- Connection -----------------------------------------------------------
+  - it: talks to the in-cluster Service even when the ingress is on
+    # The public host may have no DNS/TLS yet on a fresh instance.
+    set:
+      azurite.defaultContainers: [api]
+      azurite.ingress.enabled: true
+      azurite.ingress.hostname: blob.alpha-3.example.com
+      azurite.service.blobPort: 80
+      azurite.account.name: myapp01
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: AZ_ENDPOINT
+            value: http://azurite.alpha-3.svc.cluster.local:80/myapp01
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: AZ_ACCOUNT, value: myapp01 }
+
+  - it: reads the key from the bootstrap-managed Secret, never from values
+    set:
+      azurite.defaultContainers: [api]
+      azurite.secretName: my-blob-secret
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: AZ_KEY
+            valueFrom:
+              secretKeyRef:
+                name: my-blob-secret
+                key: AZURE_STORAGE_ACCOUNT_KEY
+
+  - it: passes the wait timeout and Job limits from provisioning.*
+    set:
+      azurite.defaultContainers: [api]
+      azurite.provisioning.waitTimeoutSeconds: 120
+      azurite.provisioning.backoffLimit: 1
+      azurite.provisioning.activeDeadlineSeconds: 300
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: WAIT_TIMEOUT_SECONDS, value: "120" }
+      - equal: { path: spec.backoffLimit, value: 1 }
+      - equal: { path: spec.activeDeadlineSeconds, value: 300 }
+
+  # --- Pod ------------------------------------------------------------------
+  - it: runs the Node script on the Azurite image itself
+    set:
+      azurite.defaultContainers: [api]
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: mcr.microsoft.com/azure-storage/azurite:3.37.0
+      - equal:
+          path: spec.template.spec.containers[0].command[0]
+          value: node
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: "ContainerAlreadyExists"
+
+  - it: runs non-root under the restricted PSS with a read-only root filesystem
+    set:
+      azurite.defaultContainers: [api]
+    asserts:
+      - equal: { path: spec.template.spec.securityContext.runAsNonRoot, value: true }
+      - equal:
+          path: spec.template.spec.securityContext.seccompProfile.type
+          value: RuntimeDefault
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          value: [ALL]
+      - equal: { path: spec.template.spec.restartPolicy, value: OnFailure }
+      - equal: { path: spec.template.spec.automountServiceAccountToken, value: false }
+
+  - it: keeps the Job pod out of the azurite Service selector
+    set:
+      azurite.defaultContainers: [api]
+    asserts:
+      - equal:
+          path: spec.template.metadata.labels
+          value:
+            app.kubernetes.io/name: azurite-provisioning
+            app.kubernetes.io/instance: my-release
