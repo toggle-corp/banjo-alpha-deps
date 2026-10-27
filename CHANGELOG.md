@@ -1,5 +1,24 @@
 # Changelog
 
+## [v0.5.0](https://github.com/toggle-corp/banjo-alpha-deps/compare/v0.4.0..v0.5.0) - 2026-10-27
+### Changes:
+
+#### 🚀  Features
+
+- *(chart)* Add per-instance Azurite Blob Storage emulator ([#2](https://github.com/toggle-corp/banjo-alpha-deps/issues/2)) - ([64b6a16](https://github.com/toggle-corp/banjo-alpha-deps/commit/64b6a16df1588079c722b687abbf4fab385f5859))
+- *(chart)* [**breaking**] Vendor MinIO images into our GHCR - ([3b30775](https://github.com/toggle-corp/banjo-alpha-deps/commit/3b30775848cdaa2a66a9f7b8d6f8ed7bfe4ed656))
+
+#### 📚 Documentation
+
+- *(chart)* Correct the GHCR package visibility note - ([7ecc3e1](https://github.com/toggle-corp/banjo-alpha-deps/commit/7ecc3e1e5f4c245f6c8f8cd146ffaae768cace95))
+
+### 🍻 Pull Requests (1)
+- (#2) [Feat(chart): add per-instance Azurite Blob Storage emulator](https://github.com/toggle-corp/banjo-alpha-deps/pull/2)
+
+### :tada: New Contributors (1)
+
+- [@sandeshit](https://github.com/sandeshit) made their first contribution in [#2](https://github.com/toggle-corp/banjo-alpha-deps/pull/2)
+
 ## [v0.4.0](https://github.com/toggle-corp/banjo-alpha-deps/compare/v0.3.0..v0.4.0) - 2026-09-02
 ### Changes:
 
